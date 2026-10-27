@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "symprog"
+dynamic = ["version"]
+description = "A lightweight toolkit for prototyping discrete and probabilistic symbolic programs in Python."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Kyle Richardson" }]
+keywords = [
+    "symbolic programming",
+    "probabilistic logic programming",
+    "weighted model counting",
+    "knowledge compilation",
+    "neuro-symbolic",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+    "numpy",
+    "sympy>=1.12",
+    "symengine",
+    "pydantic>=2",
+    "z3-solver",
+    "pysdd",
+    "python-sat",
+    "dd",
+    "dill",
+]
+
+[project.optional-dependencies]
+jax = ["jax"]
+klay = ["klaycircuits>=0.1.2; python_version >= '3.11'"]
+console = ["streamlit", "streamlit-code-editor", "pandas"]
+notebooks = ["jupyter", "graphviz"]
+dev = ["pytest", "build", "twine", "nbmake", "ipykernel"]
+
+[project.urls]
+Homepage = "https://github.com/TuLLI-AI/symprog"
+Issues = "https://github.com/TuLLI-AI/symprog/issues"
+
+[tool.hatch.version]
+path = "symprog/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["symprog", "tests", "README.md", "LICENSE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["symprog"]
