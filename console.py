@@ -25,90 +25,53 @@ And(Or(a, b), Implies(a, c))
 Or(a, d)
 """,
     "CNF (random 3-SAT)": """\
-## a random 3-CNF: 20 variables, 70 clauses
+## a random 3-CNF: 10 variables, 35 clauses
 ## each line is a clause (a disjunction of literals), and the
 ## program is their conjunction, i.e., a formula in CNF
-## the algebra panel gives Count (the number of satisfying assignments,
-## out of 2^20) and Viterbi (the weight of the most likely one), and the
-## models panel lists the satisfying assignments
+## in the circuit panel, the Count semiring gives the number of satisfying
+## assignments (out of 2^10) and Viterbi the weight of the most likely one;
+## the models panel lists the satisfying assignments
 
 ## variable weights
 x1: 0.59; x2: 0.63; x3: 0.15; x4: 0.43; x5: 0.75
 x6: 0.72; x7: 0.61; x8: 0.48; x9: 0.71; x10: 0.55
-x11: 0.84; x12: 0.37; x13: 0.74; x14: 0.27; x15: 0.46
-x16: 0.27; x17: 0.22; x18: 0.89; x19: 0.42; x20: 0.78
 
 ## clauses
-not x20 or not x5 or x10
-not x11 or not x16 or x18
-not x7 or x18 or not x16
-x18 or not x1 or x3
-not x1 or not x16 or x11
-not x7 or x19 or x8
-x15 or x3 or x19
-x16 or x4 or x10
-x18 or not x7 or x20
-not x13 or not x11 or not x8
-not x20 or x9 or not x16
-x5 or x2 or x3
-x13 or not x17 or not x9
-not x19 or x14 or x9
-x12 or not x3 or x11
-x7 or not x8 or not x1
-x6 or not x11 or not x14
-x8 or not x2 or not x18
-not x7 or not x19 or x4
-x2 or not x1 or not x7
-x7 or x2 or x1
-x3 or not x8 or not x20
-x17 or x15 or not x2
-x9 or x12 or not x16
-x7 or not x2 or not x6
-not x20 or x15 or x6
-not x17 or x10 or not x12
-not x1 or not x15 or not x3
-x8 or x16 or x12
-not x20 or not x5 or x10
-not x1 or not x7 or not x11
-not x19 or x14 or not x2
-not x2 or x6 or not x15
-x16 or not x18 or not x1
-not x15 or x2 or x14
-not x3 or x5 or not x1
-x7 or x1 or x19
-x7 or not x4 or x20
-x4 or not x16 or x13
-x4 or x9 or x5
-x4 or not x5 or not x9
-x9 or x18 or x11
-x2 or not x16 or x15
-not x7 or not x13 or not x10
-x12 or not x3 or not x11
-not x5 or x19 or not x10
-x4 or not x16 or x8
-x3 or not x10 or not x13
-not x18 or x16 or x19
-x4 or not x16 or not x20
-x5 or x6 or not x13
-not x3 or not x7 or not x8
-x17 or x10 or x15
-not x7 or x14 or not x3
-not x6 or not x14 or x7
-x1 or not x17 or not x15
-x9 or x7 or x2
-not x4 or x7 or not x15
-x20 or x16 or not x5
-x17 or x16 or x11
-not x7 or x18 or x8
-x11 or x20 or x2
-x5 or x13 or not x10
-not x3 or not x17 or not x2
-x15 or x11 or not x6
-x12 or x17 or x13
-x17 or not x3 or x14
-x20 or x14 or x16
-x8 or not x1 or x19
-x11 or x3 or not x16
+not x10 or x4 or x3
+not x5 or x9 or x3
+not x6 or not x8 or x2
+not x4 or x9 or not x8
+x9 or not x1 or x2
+not x1 or not x8 or x6
+x4 or not x10 or x9
+x2 or x10 or not x6
+x5 or x9 or x10
+not x9 or x4 or not x5
+not x10 or x4 or not x5
+not x5 or x8 or x2
+x1 or x2 or x7
+x4 or not x10 or x7
+x6 or not x2 or x10
+x4 or not x10 or not x1
+x3 or not x6 or not x7
+not x4 or x1 or x2
+not x10 or x2 or not x7
+x10 or not x1 or not x4
+x4 or x1 or x9
+x2 or not x4 or not x10
+x9 or x8 or not x1
+x5 or x6 or not x8
+x4 or not x1 or not x3
+not x10 or x8 or x3
+not x9 or x5 or not x6
+not x1 or not x8 or not x2
+x4 or x8 or x6
+not x10 or not x3 or x5
+not x1 or not x4 or not x6
+not x10 or x7 or not x1
+not x1 or x3 or not x8
+x8 or not x9 or not x1
+not x8 or x1 or x7
 """,
     "Graph coloring": """\
 ## 3-color a 4-node graph: a-b, a-c, b-c, c-d
@@ -431,7 +394,8 @@ def parsed_program(code: str, language: str):
     return parse_and_run(code, language)
 
 
-## the inference modes shown in the algebra panel: (domain, ⊕, ⊗, 0, 1, weights of ℓ and ¬ℓ, smoothing)
+## semirings of the inference modes, for the circuit panel (and the disabled algebra panel):
+## (domain, ⊕, ⊗, 0, 1, weights of ℓ and ¬ℓ, smoothing)
 ALGEBRA = {
     "Prob": ("ℝ≥0", "+", "×", "0", "1", "w, 1−w", False),
     "LogProb": ("ℝ ∪ {−∞}", "logaddexp", "+", "−∞", "0", "log w, log(1−w)", False),
@@ -476,6 +440,9 @@ def show_expression(expr) -> None:
     else:
         st.code(str(expr), language="python", wrap_lines=True)
 
+
+## NOTE: the algebra panel (`algebra_results` and `render_algebra`) is currently disabled in
+## `render_tab`; `ALGEBRA` is still used by the circuit panel
 
 @st.cache_resource(max_entries=16, show_spinner="Evaluating the program in each semiring…")
 def algebra_results(code: str, language: str):
@@ -907,7 +874,13 @@ SNIPPET_CALLS = {
 def python_snippet(code: str, language: str, output_options: list[str]) -> str:
     """Returns *code* as an inline symprog program in Python, followed by the calls
     for the selected output options."""
-    body = "\n".join(("    " + line).rstrip() for line in code.strip("\n").splitlines())
+    lines = code.splitlines()
+    ## drop blank (or whitespace-only) lines at the start and end
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    body = "\n".join(("    " + line).rstrip() for line in lines)
     calls = [SNIPPET_CALLS[o] for o in SNIPPET_CALLS if o in output_options] or [SNIPPET_CALLS["inference"]]
     return (
         "from symprog import Parser\n\n"
@@ -941,7 +914,8 @@ def render_tab(language: str) -> None:
     with col_right:
         output_options = st.multiselect(
             "Output options",
-            ["execute", "sample", "inference", "algebra", "models", "circuit"],
+            ## "algebra" is disabled for now (see below)
+            ["execute", "sample", "inference", "models", "circuit"],
             default=["execute"],
             key=f"output_{language}",
         )
@@ -957,11 +931,10 @@ def render_tab(language: str) -> None:
     )
     code = editor_out["text"] or st.session_state.get(editor_key, examples[choice])
 
-    col_run, col_python, _ = st.columns([1, 1, 6])
-    with col_run:
-        run = st.button("Execute", key=f"run_{language}")
-    with col_python:
-        with st.popover("Python code", icon=":material/code:"):
+    ## buttons sized to their labels, side by side (fixed columns made the labels wrap)
+    with st.container(horizontal=True, gap="small", vertical_alignment="center"):
+        run = st.button("Execute", key=f"run_{language}", type="primary", icon=":material/play_arrow:", width="content")
+        with st.popover("Python code", icon=":material/code:", width="content"):
             st.caption(
                 "This program as inline Python (use the copy icon at the top right). "
                 "Run it from a file or notebook: the decorator reads the function's source."
@@ -1080,12 +1053,13 @@ def render_tab(language: str) -> None:
                 except Exception:
                     st.code(traceback.format_exc(), language="python")
 
-        if "algebra" in output_options:
-            with st.expander("Algebra: one circuit, many semirings", expanded=True):
-                try:
-                    render_algebra(code, language)
-                except Exception:
-                    st.code(traceback.format_exc(), language="python")
+        ## the algebra panel is disabled for now (the circuit panel covers much of it)
+        # if "algebra" in output_options:
+        #     with st.expander("Algebra: one circuit, many semirings", expanded=True):
+        #         try:
+        #             render_algebra(code, language)
+        #         except Exception:
+        #             st.code(traceback.format_exc(), language="python")
 
         if "models" in output_options:
             with st.expander("Models", expanded=True):

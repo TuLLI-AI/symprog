@@ -134,7 +134,6 @@ The console comes with example programs in both languages (graph coloring,
 fault diagnosis, Monty Hall, a hidden Markov model and more). Besides running,
 sampling and exact inference, it can show:
 
-- the same program evaluated in each semiring, with the symbolic expressions;
 - the program's models, with a brute-force check of the solver's results;
 - the compiled circuit, with the value of each node in a chosen semiring, and
   the files to download it;
