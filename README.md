@@ -154,11 +154,13 @@ from symprog import Solver
 
 solver = Solver()
 
-## add propositional formulas and variable weights
-solver.add([
+FORMULAS = [
     "Implies(a, b)",
-    "And(Or(a, b), Implies(a, c))",
-])
+    "And(Or(a, b), Implies(a, c))"
+]
+
+## add propositional formulas and variable weights
+solver.add(FORMULAS)
 solver.add_weights({"a": 0.9, "b": 0.64, "c": 0.34})
 
 ## probabilistic inference (weighted model counting)
