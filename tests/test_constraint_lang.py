@@ -303,6 +303,63 @@ def test_grounding_or():
     assert prob(prog) == pytest.approx(1 - 0.1 * 0.3, abs=1e-5)
 
 
+def test_grounding_aggregate_condition():
+    """condition: Xor(s(X)) grounds to a single Xor over the domain, not one per element."""
+    @Parser(language="constraint")
+    def prog():
+        a: X  # type: ignore
+        b: X  # type: ignore
+        s: {a: 0.9, b: 0.7}  # type: ignore
+        t: {a: 1.0, b: 0.0}  # type: ignore
+        Or(s(X) and t(X))  # type: ignore
+        condition: Xor(s(X))  # type: ignore
+
+    # P(s__a | exactly one of s__a, s__b) = 0.9*0.3 / (0.9*0.3 + 0.1*0.7)
+    assert prob(prog) == pytest.approx(0.27 / 0.34, abs=1e-5)
+
+
+def test_grounding_constant_atom():
+    """A body atom on a domain constant, s(a), grounds to s__a (was silently dropped)."""
+    @Parser(language="constraint")
+    def prog():
+        a: X  # type: ignore
+        b: X  # type: ignore
+        s: {a: 0.9, b: 0.7}  # type: ignore
+        s(a)  # type: ignore
+
+    assert prob(prog) == pytest.approx(0.9, abs=1e-5)
+
+
+def test_grounding_constant_formula_and_condition():
+    """Constants ground inside formulas and conditions alike."""
+    @Parser(language="constraint")
+    def prog():
+        a: X  # type: ignore
+        b: X  # type: ignore
+        s: {a: 0.9, b: 0.7}  # type: ignore
+        s(a) and not s(b)  # type: ignore
+        condition: s(a) or s(b)  # type: ignore
+
+    assert prob(prog) == pytest.approx(0.9 * 0.3 / (1 - 0.1 * 0.3), abs=1e-5)
+
+
+def test_grounding_universal_condition():
+    """condition: s(X) (no aggregate) conjoins its ground instances into one condition."""
+    @Parser(language="constraint")
+    def prog():
+        a: X  # type: ignore
+        b: X  # type: ignore
+        s: {a: 0.9, b: 0.7}  # type: ignore
+        t: {a: 0.5, b: 0.5}  # type: ignore
+        And(t(X))  # type: ignore
+        condition: Implies(s(X), t(X))  # type: ignore
+
+    # P(t_a & t_b | (s_a -> t_a) & (s_b -> t_b)), each element independent:
+    # P(t | s -> t) = 0.5 / (1 - p_s * 0.5)
+    expected = (0.5 / (1 - 0.9 * 0.5)) * (0.5 / (1 - 0.7 * 0.5))
+    assert prob(prog) == pytest.approx(expected, abs=1e-5)
+
+
 # ---------------------------------------------------------------------------
 # Invalid programs
 # ---------------------------------------------------------------------------

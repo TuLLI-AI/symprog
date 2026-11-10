@@ -101,26 +101,23 @@ class GroundingTransformer(ast.NodeTransformer):
         # handle condition: before anything else
         if name == "condition":
             ann = node.annotation
-            type_vars = self._find_type_vars(ann)
-            if not type_vars: 
-                node.annotation = _GroundSubstituter({}, self).visit(
-                    copy.deepcopy(ann)
-                )
-                return node
-            
-            ## first-order case 
-            nodes = []
-            for substitution in self._enumerate_substitutions(type_vars):
-                grounded = _GroundSubstituter(substitution, self).visit(
-                    copy.deepcopy(ann)
-                )
-                nodes.append(ast.AnnAssign(
-                    target=ast.Name(id="condition", ctx=ast.Store()),
-                    annotation=grounded,
-                    value=None,
-                    simple=1,
-                ))
-            return nodes
+            ## ground exactly like a body formula (so aggregates such as Xor(e(X))
+            ## expand over the domain and constants such as s(a) become s__a),
+            ## then conjoin the ground instances into a single condition.
+            stmts = self.visit_Expr(ast.Expr(value=ann))
+            if not isinstance(stmts, list):
+                stmts = [stmts]
+            samplers = [s for s in stmts if not isinstance(s, ast.Expr)]
+            formulas = [s.value for s in stmts if isinstance(s, ast.Expr)]
+            test = formulas[0] if len(formulas) == 1 else ast.BoolOp(
+                op=ast.And(), values=formulas,
+            )
+            return samplers + [ast.AnnAssign(
+                target=ast.Name(id="condition", ctx=ast.Store()),
+                annotation=test,
+                value=None,
+                simple=1,
+            )]
             
         ann = node.annotation
 
@@ -244,10 +241,9 @@ class GroundingTransformer(ast.NodeTransformer):
         if self._is_aggregate(node.value):
             return self._ground_aggregate(node)
 
+        ## with no type variables this runs once with an empty substitution, which
+        ## still grounds calls on domain constants (e.g. s(a) → s__a)
         type_vars = self._find_type_vars(node.value)
-        if not type_vars:
-            return node
-
         ground_stmts = []
         for substitution in self._enumerate_substitutions(type_vars):
             grounded = _GroundSubstituter(substitution, self).visit(
@@ -371,7 +367,7 @@ class ConstraintTransformer(ast.NodeTransformer):
             ```
         """
         if isinstance(node.target, ast.Name) and node.target.id == "condition":
-            return ast.Assert(test=node.annotation)
+            return ast.Assert(test=self.visit(node.annotation))
     
         ### store the weight 
         assert isinstance(node.target, ast.Name)
