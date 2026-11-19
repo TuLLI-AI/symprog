@@ -365,15 +365,200 @@ y :- b2 & p2
 query(y)""",
 }
 
+## B-RASP programs are the body of `def prog(i)`: each line defines a vector by its value
+## at position i (the presets of the B-RASP simulator, https://b-rasp.github.io)
+BRASP_EXAMPLES = {
+    "Warm-up": """\
+## every value is a Boolean vector, with one bit per position i
+## Qa[i]: the symbol at i is a (one such vector per symbol)
+alphabet("ab")
+## inference and circuits: over all words of length 4
+length(4)
+
+## attention: last((value for j in mask if score), default=...)
+## takes the rightmost position j allowed by the mask where the score holds,
+## and returns the value there (or the default if there is none)
+
+## the previous symbol is a (every earlier position matches; the rightmost is i - 1)
+prev_a = last((Qa[j] for j in before(i)), default=False)
+
+## an a appeared before (only earlier a's match the score)
+seen_a = last((True for j in before(i) if Qa[j]), default=False)
+
+## position-wise: and, or, not of vectors at the same position
+b_after_a = Qb[i] and seen_a[i]
+
+## the most recent earlier b was preceded by an a
+x = last((prev_a[j] for j in before(i) if Qb[j]), default=False)
+
+return x
+
+query("abba")
+query("aabab")
+""",
+    "Positions (mod)": """\
+## (ab)*: a at the odd positions, b at the even ones, and an even length
+## positions are 1, 2, ..., n, and the word is accepted if the output is 1 at n
+alphabet("ab")
+length(6)
+
+## positional predicate: i % m == r is the same bit pattern for every word,
+## here 1 0 1 0 ...; in the transformer it is a positional encoding (layer 0)
+odd = i % 2 == 1
+
+## a function of the symbol and the position: also part of the embedding
+misplaced = (odd[i] and Qb[i]) or (not odd[i] and Qa[i])
+
+## some position up to i (upto includes i itself) holds the wrong symbol
+any_misplaced = last((True for j in upto(i) if misplaced[j]), default=False)
+
+## nothing misplaced so far, and an even number of symbols
+## (without i % m == r, B-RASP cannot tell even from odd lengths)
+Y = not any_misplaced[i] and not odd[i]
+
+return Y
+
+query("abab")
+query("aba")
+query("abba")
+""",
+    "Dyck-1 of depth 2": """\
+## balanced brackets (l, r), nested at most two deep
+alphabet("lr")
+## inference and circuits: over all words of length 6
+length(6)
+
+## the previous symbol is l, the next symbol is r
+P_l = last((Ql[j] for j in before(i)), default=False)
+S_r = first((Qr[j] for j in after(i)), default=False)
+
+## immediately matched: l followed by r, or r preceded by l
+I = (Ql[i] and S_r[i]) or (P_l[i] and Qr[i])
+
+## the nearest unmatched symbols after and before i
+A_r = first((Qr[j] for j in after(i) if not I[j]), default=False)
+B_l = last((Ql[j] for j in before(i) if not I[j]), default=False)
+
+## every symbol is matched (accepted when Y is true at the last position)
+C = I[i] or (Ql[i] and A_r[i]) or (Qr[i] and B_l[i])
+Y = last((False for j in everywhere(i) if not C[j]), default=True)
+return Y
+
+query("llrrllrlrr")
+query("lrrlllrrrl")
+""",
+    "Stair_3": """\
+## aaa, ignoring c's (a b breaks a run of a's)
+alphabet("abc")
+## inference and circuits: over all words of length 6
+length(6)
+
+## i is an a, and so is the most recent earlier a or b (c's are skipped)
+A_2 = last((Qa[i] and Qa[j] for j in before(i) if Qa[j] or Qb[j]), default=False)
+A_3 = last((Qa[i] and A_2[j] for j in before(i) if Qa[j] or Qb[j]), default=False)
+
+## some position ends a run of three
+Y = last((True for j in everywhere(i) if A_3[j]), default=False)
+return Y
+
+query("acacca")
+query("aacba")
+""",
+    "(ab)+": """\
+alphabet("ab")
+## inference and circuits: over all words of length 8
+length(8)
+
+## b preceded by a, and a followed by b
+AB = last((Qa[j] and Qb[i] for j in before(i)), default=False)
+BA = first((Qa[i] and Qb[j] for j in after(i)), default=False)
+I = AB[i] or BA[i]
+
+## every position is in an ab pair
+Y = last((False for j in everywhere(i) if not I[j]), default=True)
+return Y
+
+query("ababab")
+query("abba")
+""",
+    "{a,b,c}*a{b,c}*ba*": """\
+## some b has an a before it, and no c after it
+alphabet("abc")
+## inference and circuits: over all words of length 5
+length(5)
+
+P_a = last((True for j in before(i) if Qa[j]), default=False)
+S_c = first((True for j in after(i) if Qc[j]), default=False)
+I = Qb[i] and P_a[i] and not S_c[i]
+
+Y = last((True for j in everywhere(i) if I[j]), default=False)
+return Y
+
+query("cabba")
+query("abcb")
+query("abca")
+""",
+    "Induction heads": """\
+alphabet("abc")
+
+## the previous symbol
+PREV_a = last((Qa[j] for j in before(i)), default=False)
+PREV_b = last((Qb[j] for j in before(i)), default=False)
+PREV_c = last((Qc[j] for j in before(i)), default=False)
+
+## predict the symbol that followed the most recent earlier occurrence of the current symbol
+PREDICT_a = last((Qa[j] for j in before(i) if (Qa[i] and PREV_a[j]) or (Qb[i] and PREV_b[j]) or (Qc[i] and PREV_c[j])), default=False)
+PREDICT_b = last((Qb[j] for j in before(i) if (Qa[i] and PREV_a[j]) or (Qb[i] and PREV_b[j]) or (Qc[i] and PREV_c[j])), default=False)
+PREDICT_c = last((Qc[j] for j in before(i) if (Qa[i] and PREV_a[j]) or (Qb[i] and PREV_b[j]) or (Qc[i] and PREV_c[j])), default=False)
+
+## the prediction made at the previous position was right (shown in the trace)
+Y = last(((PREDICT_a[j] and Qa[i]) or (PREDICT_b[j] and Qb[i]) or (PREDICT_c[j] and Qc[i]) for j in before(i)), default=False)
+
+## the output: the predicted next symbol at each position
+return {"a": PREDICT_a, "b": PREDICT_b, "c": PREDICT_c}
+
+query("abcab")
+query("abcabcab")
+""",
+    "Retrieval": """\
+## associative recall: letters and numbers alternate; at each number, output the number
+## that followed the most recent earlier occurrence of the preceding letter (or ?)
+alphabet("abc123")
+
+## the previous symbol is the letter a, b, c
+P_a = last((Qa[j] for j in before(i)), default=False)
+P_b = last((Qb[j] for j in before(i)), default=False)
+P_c = last((Qc[j] for j in before(i)), default=False)
+
+## the most recent earlier position preceded by the same letter holds 1, 2, 3
+Y_1 = last((Q1[j] for j in before(i) if (P_a[i] and P_a[j]) or (P_b[i] and P_b[j]) or (P_c[i] and P_c[j])), default=False)
+Y_2 = last((Q2[j] for j in before(i) if (P_a[i] and P_a[j]) or (P_b[i] and P_b[j]) or (P_c[i] and P_c[j])), default=False)
+Y_3 = last((Q3[j] for j in before(i) if (P_a[i] and P_a[j]) or (P_b[i] and P_b[j]) or (P_c[i] and P_c[j])), default=False)
+unknown = (P_a[i] or P_b[i] or P_c[i]) and not (Y_1[i] or Y_2[i] or Y_3[i])
+return {"1": Y_1, "2": Y_2, "3": Y_3, "?": unknown}
+
+query("a3b2b1a2c1a1c3")
+""",
+}
+
 LANGUAGE_EXAMPLES = {
     "constraint": CONSTRAINT_EXAMPLES,
     "plp": PLP_EXAMPLES,
+    "brasp": BRASP_EXAMPLES,
 }
 
 LANGUAGE_LABELS = {
     "constraint": "Probabilistic Logic",
     "plp": "Probabilistic Logic Programming",
+    "brasp": "B-RASP",
 }
+
+## the function each language's program is the body of
+LANGUAGE_SIGNATURES = {"brasp": "prog(i)"}
+
+## output options of each language (all of them, for languages not listed)
+OUTPUT_OPTIONS = ["execute", "sample", "inference", "models", "circuit"]
+LANGUAGE_OUTPUT_OPTIONS = {"brasp": ["execute", "transformer", "inference", "models", "circuit"]}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -383,7 +568,7 @@ def parse_and_run(code: str, language: str):
     """Parse *code* and return a ProbabilisticProgram, or raise."""
     indent = "    "
     indented = "\n".join(indent + line for line in code.splitlines())
-    src = f"def prog():\n{indented}\n"
+    src = f"def {LANGUAGE_SIGNATURES.get(language, 'prog()')}:\n{indented}\n"
     parser = Parser(language=language)
     return parser.parse(src)
 
@@ -868,7 +1053,421 @@ SNIPPET_CALLS = {
         "print(prog.inference(mode=\"Viterbi\", symbolic=True))"
     ),
     "models": "## the models of the program\nfor model in prog.solver.models():\n    print(model)",
+    "transformer": "## the program as a transformer: layers, attention heads and FFNs\nprint(prog.language.architecture)",
 }
+
+
+def brasp_outputs(output) -> dict[str, object]:
+    """The output vectors of a B-RASP program, by label: one vector, a tuple, or a dict."""
+    if isinstance(output, dict):
+        return {str(k): v for k, v in output.items()}
+    if isinstance(output, tuple):
+        return {str(k): v for k, v in enumerate(output)}
+    return {"output": output}
+
+
+def brasp_output_sequence(outputs: dict[str, object], n: int) -> str:
+    """The output of a sequence-to-sequence program at each position: the label of the output
+    vector that is 1 there, `·` if none is, `{…}` if several are (labels are separated by
+    spaces when they are longer than one character)."""
+    symbols = []
+    for i in range(1, n + 1):
+        on = [label for label, vector in outputs.items() if vector[i]]
+        symbols.append("·" if not on else on[0] if len(on) == 1 else "{" + ",".join(on) + "}")
+    separator = "" if all(len(label) == 1 for label in outputs) else " "
+    return separator.join(symbols)
+
+
+def brasp_cell_style(value) -> str:
+    return "background-color: rgba(44, 160, 44, 0.35)" if value == 1 else ""
+
+
+def render_brasp(prog) -> None:
+    """Runs a B-RASP program on each of its queries, and shows the trace: every vector
+    (rows), at every position (columns), with the output vectors marked."""
+    from symprog.lang.languages.brasp import Run
+
+    language = prog.language
+    if not language.queries:
+        st.info('Add `query("...")` to the program to run it on a word.')
+        return
+
+    with st.expander("Python program", expanded=False):
+        st.code(prog.python_prog, language="python")
+
+    ## one expander per query (the first one open), headed by the word and its verdict
+    for number, word in enumerate(language.queries):
+        run = Run(language.alphabet, word)
+        outputs = brasp_outputs(prog.prog(run))
+
+        ## name the output vectors (they are vectors of the trace)
+        labels = {}
+        for label, vector in outputs.items():
+            name = next((n for n, v in run.vectors.items() if v is vector), None)
+            labels[name] = label
+
+        header = f"Query: `{word or 'ε'}`"
+        if len(outputs) == 1:
+            ## a recognizer: accepted when its output is 1 at the last position
+            (vector,) = outputs.values()
+            accepted = len(word) > 0 and bool(vector[len(word)])
+            header += " :green[accepted]" if accepted else " :red[rejected]"
+        elif word:
+            ## a sequence-to-sequence program: its output sequence
+            header += f" → `{brasp_output_sequence(outputs, len(word))}`"
+
+        with st.expander(header, expanded=number == 0):
+            if not word:
+                st.caption("The empty word has no positions.")
+                continue
+            if len(outputs) == 1:
+                st.caption("Accepted when the output vector (▶) is 1 at the last position.")
+            else:
+                st.caption(
+                    "The output sequence gives, at each position, the label of the output vector (▶) "
+                    "that is 1 there: · if none is, {…} if several are."
+                )
+
+            rows = {
+                (f"▶ {name}" if name in labels else name): [int(v) for v in vector]
+                for name, vector in run.vectors.items()
+            }
+            columns = [f"{i} {symbol}" for i, symbol in enumerate(word, start=1)]
+            table = pd.DataFrame.from_dict(rows, orient="index", columns=columns)
+            st.dataframe(table.style.map(brasp_cell_style), width="stretch")
+            if len(outputs) > 1:
+                st.caption("Outputs: " + ", ".join(f"▶ {name} ({label})" for name, label in labels.items()))
+
+
+## largest number of words a B-RASP program is run on, to check its circuit by brute force
+MAX_BRASP_WORDS = 20000
+
+
+def brasp_semantics_problem(prog) -> str | None:
+    """Why a B-RASP program has no semantics (no length, or not a recognizer), if so."""
+    language = prog.language
+    if len(language.architecture.outputs) != 1:
+        return ("Inference needs a recognizer, a program that returns one output vector (accepted "
+                "when it is true at the last position). This program returns "
+                f"{len(language.architecture.outputs)}: {', '.join(language.architecture.outputs)}.")
+    if language.length is None:
+        return ("Inference is over all words of a fixed length: add e.g. `length(6)` to the program. "
+                "The circuit's models are then the accepted words of that length.")
+    return None
+
+
+def brasp_probability_style(value: float) -> str:
+    return f"background-color: rgba(31, 119, 180, {0.6 * value:.2f})"
+
+
+def render_brasp_inference(prog) -> None:
+    """How many words of the declared length are accepted, and where each symbol occurs in
+    the accepted words, computed on the circuit."""
+    language = prog.language
+    n, k = language.length, len(language.alphabet)
+    count = int(round(prog.inference(mode="Count").inference.item()))
+    prob = prog.inference(mode="Prob").inference.item()
+    with st.container(horizontal=True, gap="medium"):
+        st.metric("Accepted words", f"{count:,} of {k ** n:,}", help=f"Words of length {n} over {''.join(language.alphabet)}.")
+        st.metric("P(accepted)", f"{prob:.4g}", help="With uniformly random, independent symbols: Count / |Σ|ⁿ.")
+        st.metric("Circuit size", f"{len(sdd_nodes(prog.solver._formula_obj)):,}", help="Nodes of the compiled SDD.")
+    if count == 0:
+        st.warning(f"No word of length {n} is accepted, so conditional probabilities are undefined.")
+        return
+
+    ## P(symbol at position | accepted), one query per input variable
+    table = pd.DataFrame(
+        [[prog.inference(query=f"Q{a}_{i}").inference.item() for a in language.alphabet] for i in range(1, n + 1)],
+        index=[f"position {i}" for i in range(1, n + 1)],
+        columns=language.alphabet,
+    )
+    st.dataframe(table.style.map(brasp_probability_style).format("{:.3f}"), width="stretch")
+    st.caption(
+        f"P(symbol at position | accepted), over the words of length {n}: each value is the "
+        f"query `Q<symbol>_<position>` on the circuit, e.g. `prog.inference(query=\"Q{language.alphabet[0]}_1\")`, "
+        "without listing the accepted words."
+    )
+
+
+def render_brasp_models(prog) -> None:
+    """The accepted words (the circuit's models), checked against running the program on
+    every word of the declared length."""
+    language = prog.language
+    n, k = language.length, len(language.alphabet)
+    prog.inference()  ## builds the circuit
+    models = list(itertools.islice(prog.solver.models(), MAX_MODELS + 1))
+    if len(models) > MAX_MODELS:
+        st.info(f"More than {MAX_MODELS} words are accepted, too many to list.")
+        return
+    words = sorted(language.word(m) for m in models)
+
+    if k ** n <= MAX_BRASP_WORDS:
+        executed = set()
+        for word in map("".join, itertools.product(language.alphabet, repeat=n)):
+            (vector,) = brasp_outputs(prog.prog(word)).values()
+            if vector[n]:
+                executed.add(word)
+        if executed == set(words):
+            st.success(
+                f"The circuit's models are exactly the words the program accepts when run on each "
+                f"of the {k ** n:,} words of length {n}."
+            )
+        else:
+            st.error(
+                f"The circuit and the program disagree: {sorted(set(words) - executed)[:5]} are only "
+                f"models, {sorted(executed - set(words))[:5]} are only accepted when run."
+            )
+    else:
+        st.caption(f"Not checked by running the program: {k ** n:,} words is too many.")
+
+    st.dataframe(
+        pd.DataFrame({"accepted word": words, "probability": [1 / k ** n] * len(words)}),
+        hide_index=True, width="stretch",
+    )
+    st.caption(f"{len(words):,} accepted words of length {n}, each with probability 1/{k}^{n}.")
+
+
+def render_brasp_semantics(prog, output_options: list[str]) -> None:
+    """Inference, accepted words and the circuit of a B-RASP program, over the words of the
+    length the program declares."""
+    if not {"inference", "models", "circuit"} & set(output_options):
+        return
+    problem = brasp_semantics_problem(prog)
+    if problem:
+        st.info(problem)
+        return
+    ## build the solver (the circuit) once, whichever panels are shown: it is built lazily, by
+    ## the first inference, and the circuit panel reads `prog.solver` directly
+    try:
+        prog._build_semantics()
+    except Exception:
+        st.code(traceback.format_exc(), language="python")
+        return
+    if "inference" in output_options:
+        with st.expander("Exact inference", expanded=True):
+            try:
+                render_brasp_inference(prog)
+            except Exception:
+                st.code(traceback.format_exc(), language="python")
+    if "models" in output_options:
+        with st.expander("Accepted words", expanded=True):
+            try:
+                render_brasp_models(prog)
+            except Exception:
+                st.code(traceback.format_exc(), language="python")
+    if "circuit" in output_options:
+        with st.expander("Compile circuit", expanded=False):
+            render_circuit(prog, "brasp")
+
+
+## colors of the transformer diagram
+ATTENTION_FILL, FFN_FILL, EMBEDDING_FILL, LAYER_FILL = "#dbe9f6", "#fde9d0", "#e8f3e8", "#f7f7f7"
+
+
+def dot_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def positional_encoding(predicate: str) -> str:
+    from symprog.lang.languages.brasp import positional_encoding as encoding
+    return encoding(predicate)
+
+
+def transformer_dot(arch) -> str:
+    """The transformer of a B-RASP program in graphviz dot, from the embedding (bottom) to the
+    output (top): each layer has its attention heads and its FFN, and edges show which
+    vectors each head reads, labeled by role (q: query, k: key, v: value, v@i: value at the
+    query position, d: default, pos: positional encoding)."""
+    lines = [
+        "digraph transformer {",
+        '  graph [rankdir=BT, nodesep=0.3, ranksep=0.45, fontname="Helvetica", fontsize=12];',
+        '  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled"];',
+        '  edge [color="#888888", fontname="Helvetica", fontsize=9, fontcolor="#555555", arrowsize=0.6];',
+    ]
+    unused = set(arch.unused)
+    producer = {name: name for name in arch.symbols}  ## node computing each vector
+    head_ids = {}
+    for op in arch.operations:
+        for k, head in enumerate(op.heads):
+            head_ids[id(head)] = op.name if op.kind == "attention" else f"{op.name}__head{k + 1}"
+        producer[op.name] = op.name
+
+    ## layer 0: the embedding
+    lines.append(f'  subgraph cluster_0 {{ label="Embedding (layer 0)"; style=filled; fillcolor="{LAYER_FILL}"; color="#cccccc";')
+    for name in arch.symbols:
+        lines.append(f'    "{name}" [fillcolor="{EMBEDDING_FILL}", label="{name}"];')
+    for p in arch.positional:
+        lines.append(f'    "{p}" [fillcolor="{EMBEDDING_FILL}", style="rounded,filled,dashed"];')
+    for op in arch.ffn_in(0):
+        lines.append(f'    "{op.name}" [fillcolor="{EMBEDDING_FILL}", label="{op.name}\\n{dot_text(op.source)[:40]}"{UNUSED_STYLE if op.name in unused else ""}];')
+    lines.append("  }")
+
+    ## layers 1..L: attention heads, then the FFN
+    for layer in range(1, arch.layers + 1):
+        lines.append(f'  subgraph cluster_{layer} {{ label="Layer {layer}"; style=filled; fillcolor="{LAYER_FILL}"; color="#cccccc";')
+        heads = arch.heads_in(layer)
+        if heads:
+            lines.append(f'    subgraph cluster_{layer}_attention {{ label="attention ({len(heads)} head{'s' if len(heads) > 1 else ''})"; style="filled,dashed"; fillcolor=white;')
+            for op, head in heads:
+                arrow = "▶" if head.choose == "last" else "◀"
+                title = op.name if op.kind == "attention" else f"{op.name} · head {op.heads.index(head) + 1}"
+                lines.append(f'      "{head_ids[id(head)]}" [fillcolor="{ATTENTION_FILL}", label="{title}\\n{arrow} {head.mask}(i)"{UNUSED_STYLE if op.name in unused else ""}];')
+            lines.append("    }")
+        ffn = arch.ffn_in(layer)
+        if ffn:
+            lines.append(f'    subgraph cluster_{layer}_ffn {{ label="FFN"; style="filled,dashed"; fillcolor=white;')
+            for op in ffn:
+                lines.append(f'      "{op.name}" [fillcolor="{FFN_FILL}", label="{op.name}"{UNUSED_STYLE if op.name in unused else ""}];')
+            lines.append("    }")
+        lines.append("  }")
+
+    ## edges: what each head and each FFN operation reads
+    def edge(source: str, target: str, label: str = "") -> None:
+        lines.append(f'  "{source}" -> "{target}"' + (f' [label="{label}"];' if label else ";"))
+
+    for op in arch.operations:
+        for head in op.heads:
+            roles: dict[str, list[str]] = {}
+            for role, names in [("q", head.query), ("k", head.key), ("v", head.value),
+                                ("v@i", head.value_at_i), ("d", head.default)]:
+                for name in names:
+                    roles.setdefault(producer[name], []).append(role)
+            for source, labels in roles.items():
+                edge(source, head_ids[id(head)], ",".join(labels))
+            for p in head.positional:
+                edge(positional_encoding(p), head_ids[id(head)], "pos")
+        if op.kind == "position-wise":
+            for name in op.inputs:
+                edge(producer[name], op.name)
+            for head in op.heads:
+                edge(head_ids[id(head)], op.name)
+            for p in op.positional:
+                edge(positional_encoding(p), op.name, "pos")
+
+    ## the readout
+    lines.append('  output [shape=box, style="rounded,filled", fillcolor="#eeeeee", label="output"];')
+    for name in arch.outputs:
+        edge(producer[name], "output")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+## dead code (vectors the outputs do not depend on): faded and dashed in the dataflow
+UNUSED_STYLE = ', style="rounded,filled,dashed", color="#aaaaaa", fontcolor="#999999"'
+
+## colors of the residual stream table, by the kind of stage that writes a coordinate
+STAGE_FILL = {"embedding": EMBEDDING_FILL, "attention": ATTENTION_FILL, "ffn": FFN_FILL}
+READ_FILL = "#fff3b0"
+
+
+def residual_stream_table(arch) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The residual stream, stage by stage (rows) and coordinate by coordinate (columns):
+    `add` where the stage writes the coordinate, `read` where it reads it, `·` where the
+    coordinate holds a value that the stage leaves alone, and nothing before it is written.
+    Also returns the cell colors."""
+    stages = arch.stages()
+    coordinates = arch.coordinates
+    written_by = {name: stage.kind for stage in stages for name in stage.writes}
+    unused = set(arch.unused)
+    columns = [f"▶ {c}" if c in arch.outputs else f"{c} (unused)" if c in unused else c
+               for c in coordinates]
+    labels, rows, colors = [], [], []
+    present: set[str] = set()
+    for stage in stages:
+        if stage.kind == "embedding":
+            labels.append("embedding")
+        elif stage.kind == "readout":
+            labels.append("readout")
+        else:
+            labels.append(f"layer {stage.layer} · {'attention' if stage.kind == 'attention' else 'FFN'}")
+        row, color = [], []
+        for c in coordinates:
+            if c in stage.writes:
+                row.append("add")
+                color.append(f"background-color: {STAGE_FILL[written_by[c]]}; font-weight: 600")
+            elif c in stage.reads:
+                row.append("read")
+                color.append(f"background-color: {READ_FILL}")
+            elif c in present:
+                row.append("·")
+                color.append("color: #999999")
+            else:
+                row.append("")
+                color.append("")
+        present |= set(stage.writes)
+        rows.append(row)
+        colors.append(color)
+    return (pd.DataFrame(rows, index=labels, columns=columns),
+            pd.DataFrame(colors, index=labels, columns=columns))
+
+
+def render_residual_stream(arch) -> None:
+    table, colors = residual_stream_table(arch)
+    st.dataframe(table.style.apply(lambda _: colors, axis=None), width="stretch")
+    st.caption(
+        "The residual stream has one coordinate per column, 0 until a stage writes it. Each "
+        "stage **adds** its results into their own coordinates (colored as in the dataflow: "
+        "embedding green, attention blue, FFN orange), so the stream is the concatenation of "
+        "everything computed so far. Later stages **read** coordinates by projection (the query, "
+        "key and value matrices of a head, the input layer of an FFN), and · marks a value "
+        "carried along untouched. ▶ marks the outputs, read by the readout."
+    )
+
+
+def render_transformer(prog) -> None:
+    """The transformer of a B-RASP program: its size, a diagram, and its attention heads."""
+    arch = prog.language.architecture
+    with st.container(horizontal=True, gap="medium"):
+        st.metric("Layers", arch.layers, help="The longest chain of attentions that read each other's outputs.")
+        st.metric("Attention heads", len(arch.heads))
+        st.metric("Max heads per layer", max((len(arch.heads_in(l)) for l in range(1, arch.layers + 1)), default=0))
+        st.metric("Residual width", arch.width,
+                  help="One coordinate per vector: the symbols, the positional encodings, the defined "
+                       "vectors, and heads inside position-wise expressions.")
+
+    if arch.unused:
+        st.warning(
+            f"Not used by the output: **{', '.join(arch.unused)}**. Nothing the output depends on "
+            "reads these vectors, so a compiler would drop them (with their heads and residual "
+            "coordinates). They are shown faded and dashed, as the program defines them."
+        )
+
+    dataflow, residual = st.tabs(["Dataflow", "Residual stream"])
+    with dataflow:
+        st.graphviz_chart(transformer_dot(arch))
+        st.caption(
+            "Read from the bottom up. Layer 0 is the embedding: the symbol vectors, the positional "
+            "encodings, and position-wise operations of these alone. In each layer, the attention "
+            "heads (blue) read the residual stream after the previous layer, and the FFN (orange) "
+            "computes the position-wise operations. Edge labels give the role of each vector in a "
+            "head: q (query: the score at i), k (key: the score at j), v (value at j), v@i (value at "
+            "i, combined with the attended position), d (default), pos (positional encoding). "
+            "▶ / ◀: rightmost / leftmost attention, with its mask. Edges that skip layers are not "
+            "extra connections: they read the residual stream (see the next tab)."
+        )
+    with residual:
+        render_residual_stream(arch)
+
+    rows = []
+    for op, head in arch.heads:
+        rows.append({
+            "layer": head.layer,
+            "head": op.name if op.kind == "attention" else f"{op.name} · head {op.heads.index(head) + 1}",
+            "attention": f"{'rightmost' if head.choose == 'last' else 'leftmost'}, {head.mask}(i)",
+            "query (score at i)": ", ".join(head.query) or "—",
+            "key (score at j)": ", ".join(head.key) or "—",
+            "value": ", ".join(head.value + [f"{n}@i" for n in head.value_at_i]) or "constant",
+            "default": ", ".join(head.default) or "constant",
+            "positional": ", ".join(head.positional) or "—",
+        })
+    if rows:
+        st.dataframe(pd.DataFrame(rows).sort_values("layer", kind="stable"), hide_index=True, width="stretch")
+    ffn = [op for op in arch.operations if op.kind == "position-wise"]
+    if ffn:
+        st.dataframe(
+            pd.DataFrame([{"layer": op.layer, "FFN operation": op.name, "computes": op.source} for op in ffn]),
+            hide_index=True, width="stretch",
+        )
 
 
 def python_snippet(code: str, language: str, output_options: list[str]) -> str:
@@ -885,7 +1484,7 @@ def python_snippet(code: str, language: str, output_options: list[str]) -> str:
     return (
         "from symprog import Parser\n\n"
         f"@Parser(language=\"{language}\")\n"
-        "def prog():\n"
+        f"def {LANGUAGE_SIGNATURES.get(language, 'prog()')}:\n"
         f"{body}\n\n"
         + "\n\n".join(calls)
         + "\n"
@@ -915,7 +1514,7 @@ def render_tab(language: str) -> None:
         output_options = st.multiselect(
             "Output options",
             ## "algebra" is disabled for now (see below)
-            ["execute", "sample", "inference", "models", "circuit"],
+            LANGUAGE_OUTPUT_OPTIONS.get(language, OUTPUT_OPTIONS),
             default=["execute"],
             key=f"output_{language}",
         )
@@ -951,6 +1550,23 @@ def render_tab(language: str) -> None:
         except Exception:
             st.error("Parse error")
             st.code(traceback.format_exc(), language="python")
+            return
+
+        if "execute" in output_options and language == "brasp":
+            try:
+                render_brasp(prog)
+            except Exception:
+                st.code(traceback.format_exc(), language="python")
+
+        if "transformer" in output_options and language == "brasp":
+            with st.expander("Transformer", expanded=True):
+                try:
+                    render_transformer(prog)
+                except Exception:
+                    st.code(traceback.format_exc(), language="python")
+
+        if language == "brasp":
+            render_brasp_semantics(prog, output_options)
             return
 
         if "execute" in output_options:
@@ -1109,8 +1725,8 @@ def render_tab(language: str) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    st.set_page_config(page_title="Probabilistic Language Console", layout="wide")
-    st.title("Probabilistic Language Console")
+    st.set_page_config(page_title="symprog Language Console", layout="wide")
+    st.title("symprog Language Console")
 
     tabs = st.tabs([LANGUAGE_LABELS[lang] for lang in LANGUAGE_LABELS])
     for tab, language in zip(tabs, LANGUAGE_LABELS):

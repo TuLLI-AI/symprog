@@ -214,10 +214,15 @@ class ProbabilisticProgram:
     _prog_str: str
     _solver: Solver | None = None
 
-    @property 
-    def solver(self) -> Solver | None: 
+    @property
+    def solver(self) -> Solver | None:
         """Returns the underlying solver object used by the program."""
         return self._solver
+
+    @property
+    def language(self) -> ModelingLanguage:
+        """Returns the modeling language of the program."""
+        return self._language
 
     @property 
     def prog_str(self) -> str: 
@@ -233,12 +238,12 @@ class ProbabilisticProgram:
         """Returns the underlying callable program."""
         return self._prog
 
-    def execute(self):
-        """Execute the program."""
-        return self._prog()
+    def execute(self, *args, **kwargs):
+        """Execute the program (with the program's inputs, if it takes any)."""
+        return self._prog(*args, **kwargs)
 
-    def __call__(self):
-        return self.execute()
+    def __call__(self, *args, **kwargs):
+        return self.execute(*args, **kwargs)
 
     def _build_semantics(self): 
         """Build the semantic backbone of the program. This can be used to build a symbolic 
