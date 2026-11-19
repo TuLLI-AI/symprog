@@ -1110,7 +1110,7 @@ def render_tab(language: str) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Probabilistic Language Console", layout="wide")
-    st.title("Probabilistic Language Console")
+    st.title("symprog Language Console")
 
     tabs = st.tabs([LANGUAGE_LABELS[lang] for lang in LANGUAGE_LABELS])
     for tab, language in zip(tabs, LANGUAGE_LABELS):
