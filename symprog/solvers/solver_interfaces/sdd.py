@@ -227,18 +227,17 @@ class SddMapper(SymbolicMapper[SddNode]):
             return
         rev_map = {iden.literal : var for var, iden  in self._sym_map.items()}
         l = {0 : False, 1 : True}
-        seen = set()
+        ## hidden variables are free (the formula does not depend on them), so each model
+        ## would be enumerated once per assignment to them (2^#hidden times): fix them to
+        ## false, for one copy of each model
+        for name in self._hidden_vars:
+            if name in self._sym_map:
+                formula = self.manager.conjoin(formula, self.manager.negate(self._sym_map[name]))
         for model in formula.models(vtree=self.manager.vtree()):
-            assignment = {
+            yield {
                 rev_map[k] : l[v] for k,v in model.items()
                 if rev_map[k] not in self._hidden_vars
             }
-            if self._hidden_vars:
-                key = frozenset(assignment.items())
-                if key in seen:
-                    continue
-                seen.add(key)
-            yield assignment
 
     @property
     def _hidden_vars(self) -> set[str]:
@@ -453,6 +452,22 @@ class SddMapper(SymbolicMapper[SddNode]):
             dimacs: The DIMACS string containing the formula.
 
         """
+        header = next((l.split() for l in dimacs.splitlines() if l.startswith("p cnf")), None)
+        if header is not None and int(header[2]) == 0:
+            ## no variables left (e.g., the formula simplified to ⊤ or ⊥), which the SDD
+            ## library cannot read (it crashes): a constant, false if there is a (empty) clause
+            mgr = SddManager(var_count=1)
+            root = mgr.false() if int(header[3]) > 0 else mgr.true()
+            mgr.root = root
+            self.manager = mgr
+            self._sym_map = {}
+            self._quantified_vars = set()
+            for v, var_name in enumerate(sorted(str(v) for v in self.var_list)):
+                if v > 0:
+                    mgr.add_var_after_last()
+                self._sym_map[var_name] = mgr[v + 1]
+            return (root, set())
+
         with redirect_stdout(io.StringIO()):
             mgr, root = SddManager.from_cnf_string(dimacs)
         

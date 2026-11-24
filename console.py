@@ -422,6 +422,28 @@ query("abab")
 query("aba")
 query("abba")
 """,
+    "Dyck-1 of depth 2 (past only)": """\
+## the same language as "Dyck-1 of depth 2", with masks that only look at the past,
+## so it can be compiled as an automaton (choose "automaton" above)
+alphabet("lr")
+length(20)
+
+## at odd positions the depth before is 0 or 2 (the previous symbol tells which),
+## and at even positions it is 1
+odd = i % 2 == 1
+prev_l = last((Ql[j] for j in before(i)), default=False)
+
+## an l at depth 2, or an r at depth 0
+bad = odd[i] and ((prev_l[i] and Ql[i]) or (not prev_l[i] and Qr[i]))
+any_bad = last((True for j in upto(i) if bad[j]), default=False)
+
+## accepted: back to depth 0, with nothing bad so far
+Y = not odd[i] and Qr[i] and not any_bad[i]
+return Y
+
+query("llrlrr")
+query("lllrrr")
+""",
     "Dyck-1 of depth 2": """\
 ## balanced brackets (l, r), nested at most two deep
 alphabet("lr")
@@ -564,19 +586,34 @@ LANGUAGE_OUTPUT_OPTIONS = {"brasp": ["execute", "transformer", "inference", "mod
 # Helpers
 # ---------------------------------------------------------------------------
 
-def parse_and_run(code: str, language: str):
-    """Parse *code* and return a ProbabilisticProgram, or raise."""
+def parse_and_run(code: str, language: str, options: tuple = ()):
+    """Parse *code* and return a ProbabilisticProgram, or raise. `options` are keyword
+    arguments of the language, as (name, value) pairs (see `LANGUAGE_SETTINGS`)."""
     indent = "    "
     indented = "\n".join(indent + line for line in code.splitlines())
     src = f"def {LANGUAGE_SIGNATURES.get(language, 'prog()')}:\n{indented}\n"
-    parser = Parser(language=language)
+    parser = Parser(language=language, **dict(options))
     return parser.parse(src)
 
 
 @st.cache_resource(max_entries=16, show_spinner=False)
-def parsed_program(code: str, language: str):
+def parsed_program(code: str, language: str, options: tuple = ()):
     """`parse_and_run`, reusing the program (and its compiled circuit) across reruns."""
-    return parse_and_run(code, language)
+    return parse_and_run(code, language, options)
+
+
+## settings of a language, passed to its parser: (keyword, label, choices (the first is the
+## default), help)
+LANGUAGE_SETTINGS = {
+    "brasp": [(
+        "compilation", "Circuit compilation", ["cnf", "direct", "automaton"],
+        "How the circuit is built. cnf: the formulas are translated to CNF and compiled at "
+        "once, then the vtree is minimized (much faster, and smaller circuits, on B-RASP). "
+        "direct: the formulas are applied one by one, minimizing the vtree along the way. "
+        "automaton: the program becomes its minimal DFA, unrolled over the positions (a circuit "
+        "linear in the length; for programs whose masks only look at the past: before, upto).",
+    )],
+}
 
 
 ## semirings of the inference modes, for the circuit panel (and the disabled algebra panel):
@@ -1015,6 +1052,43 @@ def draw_annotated_circuit(prog, language: str) -> tuple[str, str]:
     return mode, dot
 
 
+def render_symbolic(prog, code: str, language: str, options: tuple = ()) -> None:
+    """The symbolic representations of the circuit: its Boolean semantics (the circuit read
+    in the Formula semiring), its polynomial (the Prob semiring, with symbolic weights) and
+    the PyTorch module computing the polynomial."""
+    with st.expander("Boolean Semantics", expanded=False):
+        try:
+            for result in as_list(prog.inference(mode="Formula")):
+                show_expression(result.inference)
+            if language == "brasp":
+                st.caption(
+                    "The words the program accepts, as a formula over the input symbols: Qa_k "
+                    "means that the symbol at position k is a. The vectors the program defines "
+                    "are internal to the circuit, so they do not appear."
+                )
+        except Exception:
+            st.code(traceback.format_exc(), language="python")
+
+    with st.expander("Polynomial", expanded=False):
+        try:
+            polynomials, simplified, module_code = polynomial_results(code, language, options)
+            for polynomial in polynomials:
+                show_expression(polynomial)
+            if not simplified:
+                st.caption("Not simplified: the polynomial is too large to simplify quickly.")
+            if language == "brasp":
+                st.caption(
+                    "P(accepted) as a polynomial in the symbol probabilities: Qa_k is the "
+                    "probability that position k holds a, and each accepted word contributes "
+                    "the product of its symbols' probabilities (the console sets them all to "
+                    "1/|Σ|)."
+                )
+            with st.expander("Pytorch", expanded=False):
+                st.code(module_code, language="python")
+        except Exception:
+            st.code(traceback.format_exc(), language="python")
+
+
 @st.cache_resource(max_entries=16, show_spinner="Sampling…")
 def sample_results(code: str, language: str):
     """Samples of a program (cached, so reruns show the same samples)."""
@@ -1022,10 +1096,10 @@ def sample_results(code: str, language: str):
 
 
 @st.cache_resource(max_entries=16, show_spinner="Building the polynomial…")
-def polynomial_results(code: str, language: str):
+def polynomial_results(code: str, language: str, options: tuple = ()):
     """The polynomials of a program (simplified, when small enough: simplifying large ones
     can take minutes) and the code of its PyTorch module."""
-    prog = parsed_program(code, language)
+    prog = parsed_program(code, language, options)
     polynomials = [r.inference for r in as_list(prog.inference(mode="Prob", symbolic=True))]
     simplified = all(sp.count_ops(p) <= MAX_SIMPLIFY_OPS for p in polynomials)
     if simplified:
@@ -1053,7 +1127,16 @@ SNIPPET_CALLS = {
         "print(prog.inference(mode=\"Viterbi\", symbolic=True))"
     ),
     "models": "## the models of the program\nfor model in prog.solver.models():\n    print(model)",
-    "transformer": "## the program as a transformer: layers, attention heads and FFNs\nprint(prog.language.architecture)",
+    "transformer": (
+        "## the program as a transformer: layers, attention heads and FFNs\n"
+        "print(prog.language.architecture)\n\n"
+        "## compiled into weights: a PyTorch module that runs the program\n"
+        "from symprog.lang.languages.brasp_compiler import compile_transformer\n"
+        "model = compile_transformer(prog)\n"
+        "for word in prog.language.queries:\n"
+        "    reading = model.reading(word)  ## every vector as a probability, every head's attention\n"
+        "    print(word, {name: [round(p, 3) for p in ps] for name, ps in reading.probability.items()})"
+    ),
 }
 
 
@@ -1227,7 +1310,146 @@ def render_brasp_models(prog) -> None:
     st.caption(f"{len(words):,} accepted words of length {n}, each with probability 1/{k}^{n}.")
 
 
-def render_brasp_semantics(prog, output_options: list[str]) -> None:
+def automaton_dot(dfa) -> str:
+    """A DFA in graphviz dot: states as circles (accepting: double circles), from the start
+    (arrow from the left), with the edges between two states merged and labeled by their
+    symbols. The dead state, if any, is left out (missing edges lead to it)."""
+    live = dfa.live_states()
+    lines = [
+        "digraph automaton {",
+        '  graph [rankdir=LR, fontname="Helvetica", nodesep=0.3, ranksep=0.4];',
+        '  node [fontname="Helvetica", fontsize=11, shape=circle, width=0.4, fixedsize=true];',
+        '  edge [fontname="Helvetica", fontsize=10, arrowsize=0.6];',
+        '  start [shape=point, width=0.05];',
+        f'  start -> q{dfa.start};',
+    ]
+    for q in sorted(live | {dfa.start}):
+        shape = "doublecircle" if q in dfa.accepting else "circle"
+        lines.append(f'  q{q} [label="{q}", shape={shape}];')
+    for q in sorted(live | {dfa.start}):
+        targets: dict[int, list[str]] = {}
+        for a in dfa.alphabet:
+            if dfa.delta[q][a] in live:
+                targets.setdefault(dfa.delta[q][a], []).append(a)
+        for target, symbols in targets.items():
+            lines.append(f'  q{q} -> q{target} [label="{",".join(symbols)}"];')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def unrolled_dot(layers: list[dict]) -> str:
+    """The unrolled DFA in graphviz dot: one column per position k, with node F(k, q) for each
+    state q reached there, an edge labeled x_{k+1}=a to F(k+1, delta(q, a)), and ⊤ for the
+    suffixes that are all accepted. Edges to ⊥ are left out."""
+    n = len(layers) - 1
+    lines = [
+        "digraph unrolled {",
+        '  graph [rankdir=LR, fontname="Helvetica", nodesep=0.25, ranksep=0.6];',
+        '  node [fontname="Helvetica", fontsize=10, shape=box, style="rounded", height=0.3];',
+        '  edge [fontname="Helvetica", fontsize=9, arrowsize=0.5];',
+        '  top [label="⊤", shape=box, style="filled", fillcolor="#e8f3e8"];',
+    ]
+    for k, layer in enumerate(layers):
+        decisions = [q for q, v in layer.items() if isinstance(v, dict)]
+        if not decisions:
+            continue
+        lines.append(f'  {{ rank=same; x{k} [label="x{k + 1}", shape=plaintext, fontcolor="#888888"]; '
+                     + " ".join(f"F{k}_{q};" for q in decisions) + " }")
+        for q in decisions:
+            root = ', style="rounded,bold", penwidth=2' if k == 0 else ""
+            lines.append(f'  F{k}_{q} [label="F({k}, {q})"{root}];')
+    for k in range(n):
+        if any(isinstance(v, dict) for v in layers[k].values()) and k + 1 < n:
+            if any(isinstance(v, dict) for v in layers[k + 1].values()):
+                lines.append(f"  x{k} -> x{k + 1} [style=invis];")
+    for k, layer in enumerate(layers[:-1]):
+        for q, v in layer.items():
+            if not isinstance(v, dict):
+                continue
+            targets: dict[str, list[str]] = {}
+            for a, r in v.items():
+                child = layers[k + 1][r]
+                if child is False:
+                    continue
+                targets.setdefault("top" if child is True else f"F{k + 1}_{r}", []).append(a)
+            for target, symbols in targets.items():
+                label = f"x{k + 1}=" + ("|".join(symbols) if len(symbols) > 1 else symbols[0])
+                lines.append(f'  F{k}_{q} -> {target} [label="{dot_text(label)}"];')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def unrolled_equations(layers: list[dict]) -> str:
+    """The equations of the unrolled DFA, F(k, q) = Or_a [x_{k+1} = a] And F(k+1, delta(q, a)),
+    from the root down, with the ⊥ terms dropped and ⊤ factors left out."""
+    def name(k, q):
+        v = layers[k][q]
+        return "⊤" if v is True else "⊥" if v is False else f"F({k}, {q})"
+
+    lines = []
+    for k, layer in enumerate(layers[:-1]):
+        for q, v in layer.items():
+            if not isinstance(v, dict):
+                continue
+            terms = []
+            for a, r in v.items():
+                child = name(k + 1, r)
+                if child == "⊥":
+                    continue
+                terms.append(f"[x{k + 1}={a}]" if child == "⊤" else f"([x{k + 1}={a}] ∧ {child})")
+            lines.append(f"F({k}, {q}) = " + " ∨ ".join(terms))
+    return "\n".join(lines) or f"F(0, {next(iter(layers[0]))}) = {name(0, next(iter(layers[0])))}"
+
+
+## the largest unrolling drawn (decision nodes)
+UNROLLED_DRAW_LIMIT = 300
+
+
+def render_unrolled(dfa, n: int, key: str) -> None:
+    """The DFA unrolled over the words of length m <= n, as a layered graph and as equations."""
+    m = st.number_input("Unroll to length", min_value=1, max_value=n, value=min(n, 6), step=1, key=key,
+                        help="The circuit unrolls the DFA to the program's length; a shorter one is easier to read.")
+    layers = dfa.unrolled(int(m))
+    decisions = sum(isinstance(v, dict) for layer in layers for v in layer.values())
+    st.caption(
+        f"F(k, q) is the node for \"the rest of the word, x{{k+1}} … x{m}, leads the DFA from state q to "
+        f"acceptance\"; the root F(0, {dfa.start}) is the whole language. Each node decides on the next "
+        "symbol and moves to the next column, so prefixes that reach the same state share the node. "
+        "Branches into ⊥ (no suffix accepted, e.g. the dead state) are dropped, and nodes whose suffixes "
+        f"are all accepted become ⊤. {decisions:,} decision nodes, out of the {m * dfa.size:,} copies "
+        f"({m} positions × {dfa.size} states)."
+    )
+    if decisions == 0:
+        st.code(unrolled_equations(layers), language=None)
+    elif decisions <= UNROLLED_DRAW_LIMIT:
+        st.graphviz_chart(unrolled_dot(layers))
+        st.code(unrolled_equations(layers), language=None)
+    else:
+        st.info(f"{decisions:,} decision nodes is too many to draw; choose a shorter length.")
+
+
+def render_automaton(prog) -> None:
+    """The minimal DFA of a B-RASP program (with the automaton compilation)."""
+    dfa = prog.language.automaton(prog.python_prog)
+    n = prog.language.length
+    dead = dfa.size - len(dfa.live_states() | {dfa.start})
+    with st.container(horizontal=True, gap="medium"):
+        st.metric("States", dfa.size, help="Of the minimal DFA, including the dead state (if any), which is not drawn.")
+        st.metric("Accepting", len(dfa.accepting))
+        st.metric(f"Circuit bound (n = {n})", f"{n * dfa.size:,}",
+                  help="Decision nodes of the unrolled DFA: at most one per position and state.")
+    st.graphviz_chart(automaton_dot(dfa))
+    st.caption(
+        "The minimal DFA of the program: it reads the word from left to right, and accepts it when "
+        "it ends in a double circle (the program's output is 1 at the last position). The circuit "
+        f"unrolls it over the {n} positions, one decision node per position and state."
+        + (" The dead state, from which no word is accepted, is not drawn: missing edges lead to it." if dead else "")
+    )
+    st.markdown("**Unrolled**")
+    render_unrolled(dfa, n, key=f"unroll_{hash(prog.python_prog)}")
+
+
+def render_brasp_semantics(prog, code: str, output_options: list[str], options: tuple = ()) -> None:
     """Inference, accepted words and the circuit of a B-RASP program, over the words of the
     length the program declares."""
     if not {"inference", "models", "circuit"} & set(output_options):
@@ -1240,9 +1462,20 @@ def render_brasp_semantics(prog, output_options: list[str]) -> None:
     ## the first inference, and the circuit panel reads `prog.solver` directly
     try:
         prog._build_semantics()
-    except Exception:
-        st.code(traceback.format_exc(), language="python")
+    except Exception as e:
+        ## matched by name: a reloaded module has a new `FutureMask` class
+        if type(e).__name__ == "FutureMask":
+            st.info(f"The automaton compilation does not apply: {e}. This program uses `after`, "
+                    "`onwards` or `everywhere`; choose the cnf or direct compilation.")
+        else:
+            st.code(traceback.format_exc(), language="python")
         return
+    if prog.language.compilation == "automaton":
+        with st.expander("Automaton", expanded=True):
+            try:
+                render_automaton(prog)
+            except Exception:
+                st.code(traceback.format_exc(), language="python")
     if "inference" in output_options:
         with st.expander("Exact inference", expanded=True):
             try:
@@ -1258,6 +1491,7 @@ def render_brasp_semantics(prog, output_options: list[str]) -> None:
     if "circuit" in output_options:
         with st.expander("Compile circuit", expanded=False):
             render_circuit(prog, "brasp")
+            render_symbolic(prog, code, "brasp", options)
 
 
 ## colors of the transformer diagram
@@ -1414,6 +1648,248 @@ def render_residual_stream(arch) -> None:
     )
 
 
+## words checked against the program, at most, in the compiled transformer tab
+MAX_CHECKED_WORDS = 2000
+
+
+@st.cache_resource(max_entries=8, show_spinner="Compiling the transformer…")
+def compiled_transformer(_prog, code: str, max_length: int, gap: float, beta: float):
+    """The program compiled into a transformer (cached by its code and the settings)."""
+    from symprog.lang.languages.brasp_compiler import compile_transformer
+    return compile_transformer(_prog, max_length=max_length, gap=gap, beta=beta)
+
+
+def weight_style(scale: float):
+    """Cell colors for a weight matrix: blue for positive, red for negative, by magnitude."""
+    def style(value) -> str:
+        if not isinstance(value, (int, float)) or value == 0 or scale == 0:
+            return "color: #bbbbbb"
+        alpha = 0.15 + 0.55 * min(abs(value) / scale, 1.0)
+        return f"background-color: rgba({'31, 119, 180' if value > 0 else '214, 39, 40'}, {alpha:.2f})"
+    return style
+
+
+def probability_style(value) -> str:
+    if not isinstance(value, (int, float)):
+        return ""
+    return f"background-color: rgba(44, 160, 44, {0.6 * value:.2f})"
+
+
+def weight_frame(matrix, rows: list[str], columns: list[str]) -> pd.DataFrame:
+    """A weight matrix as a table, without the rows and columns that are all zero."""
+    frame = pd.DataFrame(matrix.detach().numpy(), index=rows, columns=columns)
+    frame = frame.loc[(frame != 0).any(axis=1), (frame != 0).any(axis=0)]
+    return frame
+
+
+def show_weights(frame: pd.DataFrame, caption: str) -> None:
+    st.markdown(caption)
+    if frame.empty:
+        st.caption("All zero.")
+        return
+    scale = float(frame.abs().max().max())
+    st.dataframe(frame.style.map(weight_style(scale)).format("{:g}"), width="stretch")
+
+
+def render_compiled_weights(model) -> None:
+    """The weights of one component of the compiled transformer, chosen in a select box."""
+    coords = [c.name for c in model.layout]
+    components = ["Embedding"]
+    for layer in range(1, model.layers + 1):
+        components += [f"Layer {layer} · head {head.spec.name}" for head in model.attention[layer]]
+    components += [f"Layer {layer} · FFN" if layer else "Embedding · FFN" for layer in range(model.layers + 1)
+                   if model.ffn[layer].W_1.shape[1]]
+    ## in the order of the network
+    order = {"Embedding": (0, 0), "Embedding · FFN": (0, 2)}
+    for c in components:
+        if c.startswith("Layer "):
+            order[c] = (int(c.split()[1]), 1 if "head" in c else 2)
+    choice = st.selectbox("Component", sorted(components, key=order.__getitem__), key=f"weights_{id(model)}")
+
+    if choice == "Embedding":
+        show_weights(weight_frame(model.token, ["BOS"] + list(model.alphabet), coords),
+                     "**Token embedding** (one row per symbol, BOS first): each symbol is +1 in its own "
+                     "coordinate and −1 in the other symbols'.")
+        show_weights(weight_frame(model.position, [f"{j}" for j in range(model.max_length + 1)], coords),
+                     "**Positional embedding** (one row per position, 0 is BOS): `one`, the position as "
+                     "`pos` = j / max length, and the positional encodings `pos % m == r` as ±1.")
+    elif "head" in choice:
+        layer = int(choice.split()[1])
+        head = next(h for h in model.attention[layer] if choice.endswith(f"head {h.spec.name}"))
+        spec = head.spec
+        features = [f for _, f in spec.key_features()]
+        qk = [f"S[{k}]" for k in range(len(features))] + ["position", "BOS"]
+        v = ["found"] + [f"{n}@j" for n in spec.value_j]
+        st.caption(
+            f"`{'rightmost' if spec.choose == 'last' else 'leftmost'}` attention, mask `{spec.mask}(i)`. "
+            "The logit of (i, j) is x_i W_Q · x_j W_K: λ when the score holds at j (through the score "
+            "features the FFN before computes), ± μ·j/N toward the rightmost (leftmost) match, and λ/2 at "
+            "BOS, which wins when nothing matches. The values are `found` (one − 2·bos: +1 at a "
+            "match, −1 at BOS) and a copy of the vectors that the value reads at j."
+        )
+        col_q, col_k = st.columns(2)
+        with col_q:
+            show_weights(weight_frame(head.W_Q, coords, qk), "**W_Q** (query, at i)")
+        with col_k:
+            show_weights(weight_frame(head.W_K, coords, qk), "**W_K** (key, at j)")
+        col_v, col_o = st.columns(2)
+        with col_v:
+            show_weights(weight_frame(head.W_V, coords, v), "**W_V** (value)")
+        with col_o:
+            show_weights(weight_frame(head.W_O, v, coords), "**W_O** (written to the residual stream)")
+    else:
+        layer = 0 if choice.startswith("Embedding") else int(choice.split()[1])
+        ffn = model.ffn[layer]
+        units = [f"{t.output} · row {k + 1}" for t in model.tables[layer]
+                 for k, (_, value) in enumerate(t.rows.items()) if t.encoding == "±1" or value]
+        st.caption(
+            "One hidden unit per row of a lookup table: ReLU(Σ ±x − (k − 1) − 2·bos) is 1 exactly when its "
+            "k inputs match the row's signs, and 0 at BOS. W_2 writes the row's value (±1 for a vector, "
+            "1 for a score feature). Each unit is a row of the operation's conditional probability table "
+            "(see FFN tables)."
+        )
+        show_weights(weight_frame(ffn.W_1.T, units, coords), "**W_1** (units × residual coordinates)")
+        show_weights(pd.DataFrame({"b_1": ffn.b_1.detach().numpy()}, index=units), "**b_1**")
+        show_weights(weight_frame(ffn.W_2, units, coords), "**W_2** (written to the residual stream)")
+
+
+def render_compiled_run(prog, model) -> None:
+    """The compiled transformer on a query, read as a stochastic B-RASP program."""
+    queries = [q for q in prog.language.queries if 0 < len(q) <= model.max_length]
+    if not queries:
+        st.info(f'Add `query("...")` (of length at most {model.max_length}) to run the transformer on a word.')
+        return
+    word = st.selectbox("Query", queries, key=f"compiled_query_{id(model)}")
+    reading = model.reading(word)
+    columns = [f"{i} {symbol}" for i, symbol in enumerate(word, start=1)]
+    layout = {c.name: c for c in model.layout}
+    rows = {(f"▶ {name}" if name in model.outputs else name): ps for name, ps in reading.probability.items()
+            if not name.startswith("pos % ")}
+    st.markdown("**Every vector as a probability**, Pr(true) = sigmoid(β · coordinate)")
+    st.dataframe(pd.DataFrame.from_dict(rows, orient="index", columns=columns)
+                 .style.map(probability_style).format("{:.3f}"), width="stretch")
+    st.caption(
+        "Rows: the symbols, the signals that heads write (`.found`, and the vectors copied from the "
+        "attended position, `@j`, which are 0.5 when nothing matched: their coordinate is 0), and the "
+        "program's vectors (written by the FFNs). The compiled weights give probabilities close to 0 and "
+        "1, which are the program's values; a trained transformer gives a stochastic program."
+    )
+    st.markdown("**Attention of each head**: rows are the query position i, columns the attended "
+                "position j (0 is BOS: no match, the default)")
+    labels = ["0 BOS"] + columns
+    heads = [h for layer in range(1, model.layers + 1) for h in model.attention[layer]]
+    for start in range(0, len(heads), 2):
+        cols = st.columns(2)
+        for col, head in zip(cols, heads[start:start + 2]):
+            with col:
+                spec = head.spec
+                st.caption(f"Layer {spec.layer} · `{spec.name}` "
+                           f"({'rightmost' if spec.choose == 'last' else 'leftmost'}, `{spec.mask}(i)`)")
+                pattern = pd.DataFrame(reading.attention[spec.name].numpy(), index=labels, columns=labels)
+                st.dataframe(pattern.iloc[1:].style.map(probability_style).format("{:.2f}"), width="stretch")
+
+
+def render_compiled_tables(model) -> None:
+    """The FFN of an operation, as a conditional probability table."""
+    names = [t.output for tables in model.tables for t in tables if t.encoding == "±1"]
+    if not names:
+        st.info("The program has no operations.")
+        return
+    name = st.selectbox("Operation", names, key=f"cpt_{id(model)}")
+    layer, table = model.table(name)
+    rows = model.cpt(name)
+    probability = f"Pr({name} = 1)"
+    frame = pd.DataFrame(rows)
+    frame = frame.astype({c: "Int64" for c in frame.columns if c != probability})
+    st.dataframe(frame.style.map(probability_style, subset=[probability])
+                 .format({probability: "{:.4f}"}, na_rep="–"), hide_index=True, width="stretch")
+    st.caption(
+        f"The FFN of {'the embedding' if layer == 0 else f'layer {layer}'} computes `{name}` from the "
+        "coordinates above (1 is +1, 0 is −1, – does not matter: the bits a head copied, when it found no "
+        "match). Each row is one hidden unit; clamping the inputs to the row and reading the output gives "
+        f"`{probability}`. For the compiled weights, it is the program's truth table; after training, the "
+        "same table measures how far the FFN still computes the operation."
+    )
+
+
+def render_compiled_transformer(prog) -> None:
+    """The program compiled into the weights of a transformer (`brasp_compiler`)."""
+    from symprog.lang.languages.brasp_compiler import compile_transformer  # noqa: F401 (import errors show here)
+    language = prog.language
+    default_length = max([language.length or 0] + [len(q) for q in language.queries]) or 16
+    with st.container(horizontal=True, gap="medium"):
+        max_length = st.number_input("Max length", min_value=1, max_value=256, value=default_length,
+                                     key=f"compiled_length_{hash(prog.python_prog)}",
+                                     help="The longest word the transformer runs on (its positional embedding).")
+        gap = st.number_input("Attention gap", min_value=1.0, max_value=50.0, value=20.0, step=1.0,
+                              key=f"compiled_gap_{hash(prog.python_prog)}",
+                              help="How much the logits of neighboring positions differ: attention is hard "
+                                   "up to about exp(−gap).")
+        beta = st.number_input("Readout β", min_value=1.0, max_value=50.0, value=10.0, step=1.0,
+                               key=f"compiled_beta_{hash(prog.python_prog)}",
+                               help="Pr(true) = sigmoid(β · coordinate).")
+    model = compiled_transformer(prog, prog.python_prog, int(max_length), float(gap), float(beta))
+
+    ## check against the program, on the queries and on all words up to some length
+    k = len(language.alphabet)
+    n = 0
+    while n < model.max_length and sum(k ** m for m in range(1, n + 2)) <= MAX_CHECKED_WORDS:
+        n += 1
+    words = [w for m in range(1, n + 1) for w in map("".join, itertools.product(language.alphabet, repeat=m))]
+    words += [q for q in language.queries if q and len(q) <= model.max_length]
+    wrong = model.check(prog, words)
+    fidelity = model.fidelity(prog, words[-200:])
+
+    with st.container(horizontal=True, gap="medium"):
+        st.metric("Residual width", model.width,
+                  help="Coordinates of the residual stream: the embedding, the signals of the heads, the "
+                       "vectors, and the score features (see Layout).")
+        st.metric("Parameters", f"{model.parameter_count():,}")
+        st.metric("FFN units", sum(f.W_1.shape[1] for f in model.ffn),
+                  help="Rows of the lookup tables, over all FFNs.")
+        st.metric("Agrees with the program", f"{len(words) - len({w for w, _ in wrong})}/{len(words)} words",
+                  help=f"Every vector, at every position, on all words up to length {n} and on the queries.")
+        st.metric("Min fidelity", f"{min(fidelity.values()):.4f}" if fidelity else "–",
+                  help="For each vector, the mean probability the transformer gives to the program's value; "
+                       "the smallest over the vectors.")
+    if wrong:
+        st.error("Disagreements (word, vector): " + ", ".join(f"`{w}` {v}" for w, v in wrong[:10]))
+
+    run_tab, weights_tab, tables_tab, layout_tab = st.tabs(["Run", "Weights", "FFN tables", "Layout"])
+    with run_tab:
+        render_compiled_run(prog, model)
+    with weights_tab:
+        render_compiled_weights(model)
+    with tables_tab:
+        render_compiled_tables(model)
+    with layout_tab:
+        st.dataframe(pd.DataFrame([{
+            "coordinate": c.name,
+            "written by": "embedding" if c.kind == "embedding" else
+                          f"layer {c.layer} · attention" if c.kind == "attention" else
+                          f"{'embedding' if c.layer == 0 else f'layer {c.layer}'} · FFN",
+            "kind": {"embedding": "embedding", "attention": "head signal", "ffn": "vector",
+                     "feature": "score feature"}[c.kind],
+            "encoding": c.encoding,
+            "description": c.description,
+        } for c in model.layout]), hide_index=True, width="stretch")
+        st.caption(
+            "Unlike the residual stream of the architecture, an attention writes raw signals (`found`, and "
+            "the vectors its value reads at j), and the FFN of the same layer turns them into the vector "
+            "(the value, or the default); the FFN before a head also computes its score features, so that "
+            "the score is bilinear in the query and the key. ±1 coordinates are Booleans (0 until written); "
+            "0/1 coordinates are the constants and the score features."
+        )
+
+    st.caption(
+        "The program compiled into an ordinary transformer (no layer normalization): embeddings, attention "
+        "heads with W_Q, W_K, W_V, W_O, ReLU FFNs and residual connections, whose weights compute the program. "
+        "Read as probabilities, it is a stochastic B-RASP program with the same structure: each head is a "
+        "categorical choice of the attended position, and each FFN operation a Bernoulli with a conditional "
+        "probability table. In Python: `compile_transformer(prog)` in `symprog.lang.languages.brasp_compiler`."
+    )
+
+
 def render_transformer(prog) -> None:
     """The transformer of a B-RASP program: its size, a diagram, and its attention heads."""
     arch = prog.language.architecture
@@ -1432,7 +1908,12 @@ def render_transformer(prog) -> None:
             "coordinates). They are shown faded and dashed, as the program defines them."
         )
 
-    dataflow, residual = st.tabs(["Dataflow", "Residual stream"])
+    dataflow, residual, compiled = st.tabs(["Dataflow", "Residual stream", "Compiled transformer"])
+    with compiled:
+        try:
+            render_compiled_transformer(prog)
+        except Exception:
+            st.code(traceback.format_exc(), language="python")
     with dataflow:
         st.graphviz_chart(transformer_dot(arch))
         st.caption(
@@ -1470,7 +1951,7 @@ def render_transformer(prog) -> None:
         )
 
 
-def python_snippet(code: str, language: str, output_options: list[str]) -> str:
+def python_snippet(code: str, language: str, output_options: list[str], options: tuple = ()) -> str:
     """Returns *code* as an inline symprog program in Python, followed by the calls
     for the selected output options."""
     lines = code.splitlines()
@@ -1483,7 +1964,7 @@ def python_snippet(code: str, language: str, output_options: list[str]) -> str:
     calls = [SNIPPET_CALLS[o] for o in SNIPPET_CALLS if o in output_options] or [SNIPPET_CALLS["inference"]]
     return (
         "from symprog import Parser\n\n"
-        f"@Parser(language=\"{language}\")\n"
+        f"@Parser(language=\"{language}\"{''.join(f', {k}={v!r}' for k, v in options)})\n"
         f"def {LANGUAGE_SIGNATURES.get(language, 'prog()')}:\n"
         f"{body}\n\n"
         + "\n\n".join(calls)
@@ -1502,6 +1983,14 @@ def render_tab(language: str) -> None:
             list(examples.keys()),
             key=f"example_{language}",
         )
+        settings = {}
+        for keyword, label, choices, help_ in LANGUAGE_SETTINGS.get(language, []):
+            settings[keyword] = st.segmented_control(
+                label, choices, default=choices[0], key=f"setting_{language}_{keyword}", help=help_,
+            ) or choices[0]
+        ## only non-default settings are passed (and shown in the Python code)
+        options = tuple((k, v) for (k, _, choices, _), v in
+                        zip(LANGUAGE_SETTINGS.get(language, []), settings.values()) if v != choices[0])
 
     # Sync editor when example changes
     editor_key = f"code_{language}"
@@ -1538,7 +2027,7 @@ def render_tab(language: str) -> None:
                 "This program as inline Python (use the copy icon at the top right). "
                 "Run it from a file or notebook: the decorator reads the function's source."
             )
-            st.code(python_snippet(code, language, output_options), language="python")
+            st.code(python_snippet(code, language, output_options, options), language="python")
 
     ## keep showing the results of an executed program (e.g., when options change), until its code changes
     executed_key = f"executed_{language}"
@@ -1546,7 +2035,7 @@ def render_tab(language: str) -> None:
         st.session_state[executed_key] = code
     if st.session_state.get(executed_key) == code:
         try:
-            prog = parsed_program(code, language)
+            prog = parsed_program(code, language, options)
         except Exception:
             st.error("Parse error")
             st.code(traceback.format_exc(), language="python")
@@ -1566,7 +2055,7 @@ def render_tab(language: str) -> None:
                     st.code(traceback.format_exc(), language="python")
 
         if language == "brasp":
-            render_brasp_semantics(prog, output_options)
+            render_brasp_semantics(prog, code, output_options, options)
             return
 
         if "execute" in output_options:
@@ -1691,26 +2180,7 @@ def render_tab(language: str) -> None:
                 except Exception:
                     st.code(traceback.format_exc(), language="python")
 
-                with st.expander("Boolean Semantics", expanded=False):
-                    try:
-                        ### boolean encoding of the semantics
-                        for result in as_list(prog.inference(mode='Formula')):
-                            st.latex(sp.latex(result.inference))
-                        #st.write(semantics)
-                    except Exception:
-                        st.code(traceback.format_exc(), language="python")
-
-                with st.expander("Polynomial", expanded=False):
-                    try:
-                        polynomials, simplified, module_code = polynomial_results(code, language)
-                        for polynomial in polynomials:
-                            show_expression(polynomial)
-                        if not simplified:
-                            st.caption("Not simplified: the polynomial is too large to simplify quickly.")
-                        with st.expander("Pytorch", expanded=False):
-                            st.code(module_code, language="python")
-                    except Exception:
-                        st.code(traceback.format_exc(), language="python")
+                render_symbolic(prog, code, language, options)
 
         # if "ground program" in output_options:
         #     with st.expander("Ground program", expanded=False):

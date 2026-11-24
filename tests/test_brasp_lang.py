@@ -532,3 +532,161 @@ def test_unused_vectors():
         return x
 
     assert prog.language.architecture.unused == ["seen_a", "b_after_a"]
+
+
+SETTINGS = [
+    dict(compilation="cnf"),
+    dict(compilation="cnf", project=False),
+    dict(compilation="direct"),
+    dict(compilation="direct", project=False),
+]
+
+
+@pytest.mark.parametrize("settings", SETTINGS)
+def test_compilations_agree(settings):
+    ## some a is followed (anywhere later) by a b
+    source = '''
+def prog(i):
+    alphabet("ab")
+    length(5)
+    later_b = first((True for j in after(i) if Qb[j]), default=False)
+    Y = last((True for j in everywhere(i) if Qa[j] and later_b[j]), default=False)
+    return Y
+'''
+    prog = Parser(language="brasp", **settings).parse(source)
+    expected = {w for w in map("".join, itertools.product("ab", repeat=5)) if "a" in w and "b" in w[w.index("a"):]}
+    assert prog.inference(mode="Count").inference.item() == len(expected)
+    assert prog.inference(mode="Prob").inference.item() == pytest.approx(len(expected) / 32)
+    assert prog.inference(mode="Viterbi").inference.item() == pytest.approx(1 / 32)
+    assert {prog.language.word(m) for m in prog.solver.models()} == expected
+    p_b_last = sum(w[-1] == "b" for w in expected) / len(expected)
+    assert prog.inference(query="Qb_5").inference.item() == pytest.approx(p_b_last)
+    ## a projected circuit hides the variables of the defined vectors
+    hidden = prog.solver._solver._hidden_vars
+    defined = set(prog.language.compiled.defined)
+    assert (defined <= hidden) == settings.get("project", True)
+
+
+@pytest.mark.parametrize("settings", SETTINGS)
+def test_compilations_constant_outputs(settings):
+    never = Parser(language="brasp", alphabet="ab", length=3, **settings).parse(
+        "def never(i):\n    Y = last((True for j in before(i) if Qa[j] and not Qa[j]), default=False)\n    return Y\n")
+    always = Parser(language="brasp", alphabet="ab", length=3, **settings).parse(
+        "def always(i):\n    Y = last((False for j in before(i) if Qa[j] and not Qa[j]), default=True)\n    return Y\n")
+    assert never.inference(mode="Count").inference.item() == 0
+    assert always.inference(mode="Count").inference.item() == 8
+
+
+def test_unknown_compilation():
+    with pytest.raises(ValueError, match="compilation"):
+        Parser(language="brasp", compilation="bdd")
+
+
+# ---------------------------------------------------------------------------
+# Automata (programs whose masks only look at the past)
+# ---------------------------------------------------------------------------
+
+PAST_ONLY = {
+    "warm-up": ("ab", '''
+prev_a = last((Qa[j] for j in before(i)), default=False)
+x = last((prev_a[j] for j in before(i) if Qb[j]), default=False)
+return x
+'''),
+    "first, before": ("ab", '''
+first_b = first((Qb[j] for j in before(i) if Qa[j] or Qb[j]), default=False)
+y = first_b[i] and Qa[i]
+return y
+'''),
+    "scores of i and j": ("abc", '''
+s = last((Qc[j] for j in before(i) if (Qa[i] and Qb[j]) or (Qb[i] and Qa[j])), default=True)
+t = first((s[j] for j in upto(i) if Qc[j] or s[j]), default=False)
+y = t[i] if Qa[i] else not s[i]
+return y
+'''),
+    "mod in scores": ("ab", '''
+odd_a = last((True for j in before(i) if Qa[j] and j % 3 == 1), default=False)
+even = i % 2 == 0
+y = odd_a[i] and even[i]
+return y
+'''),
+    "value at i": ("ab", '''
+v = last((Qa[i] and Qb[j] for j in upto(i) if Qa[j] or Qb[j]), default=True)
+w = last((v[j] for j in before(i) if not v[j]), default=True)
+return w
+'''),
+    "dyck depth 2": ("lr", '''
+odd = i % 2 == 1
+prev_l = last((Ql[j] for j in before(i)), default=False)
+bad = odd[i] and ((prev_l[i] and Ql[i]) or (not prev_l[i] and Qr[i]))
+any_bad = last((True for j in upto(i) if bad[j]), default=False)
+Y = not odd[i] and Qr[i] and not any_bad[i]
+return Y
+'''),
+}
+
+
+def past_only(name, **settings):
+    alphabet, body = PAST_ONLY[name]
+    source = "def prog(i):\n" + "\n".join("    " + line for line in body.strip().splitlines())
+    return Parser(language="brasp", alphabet=alphabet, **settings).parse(source)
+
+
+@pytest.mark.parametrize("name", PAST_ONLY)
+def test_automaton_matches_execution(name):
+    prog = past_only(name)
+    dfa = prog.language.automaton(prog.python_prog)
+    for n in range(0, 8):
+        for word in map("".join, itertools.product(prog.language.alphabet, repeat=n)):
+            assert dfa.accepts(word) == (n > 0 and bool(prog.execute(word)[n])), word
+    ## minimal: no two states accept the same words (checked on words up to length 6)
+    signatures = set()
+    for q in range(dfa.size):
+        dfa_q = type(dfa)(dfa.alphabet, dfa.delta, q, dfa.accepting)
+        signatures.add(tuple(dfa_q.accepts(w) for n in range(0, 7)
+                             for w in map("".join, itertools.product(dfa.alphabet, repeat=n))))
+    assert len(signatures) == dfa.size
+
+
+@pytest.mark.parametrize("name", PAST_ONLY)
+def test_automaton_compilation_matches_cnf(name):
+    by_automaton = past_only(name, length=6, compilation="automaton")
+    by_cnf = past_only(name, length=6)
+    for mode in ["Count", "Prob", "Viterbi"]:
+        assert by_automaton.inference(mode=mode).inference.item() == \
+            pytest.approx(by_cnf.inference(mode=mode).inference.item())
+    words = lambda prog: {prog.language.word(m) for m in prog.solver.models()}
+    assert words(by_automaton) == words(by_cnf)
+    dfa = by_automaton.language.automaton(by_automaton.python_prog)
+    assert dfa.count(6) == by_cnf.inference(mode="Count").inference.item()
+
+
+def test_automaton_needs_past_masks():
+    from symprog.lang.languages.brasp import FutureMask
+
+    @Parser(language="brasp", alphabet="ab", length=4, compilation="automaton")
+    def prog(i):
+        later_b = first((True for j in after(i) if Qb[j]), default=False)  # type: ignore
+        return later_b
+
+    with pytest.raises(FutureMask, match="past"):
+        prog.inference()
+
+
+def test_unrolled_automaton():
+    """The unrolled DFA (no two consecutive b's) decides the same words as the DFA, with the
+    dead state dropped as ⊥ and the all-accepting suffixes as ⊤."""
+    from symprog.lang.languages.brasp import Automaton
+    dfa = Automaton(["a", "b"], [{"a": 0, "b": 1}, {"a": 0, "b": 2}, {"a": 2, "b": 2}], 0, {0, 1})
+    assert dfa.unrolled(3)[2] == {0: True, 1: {"a": 0, "b": 2}, 2: False}
+
+    def accepts(layers, word):
+        q = dfa.start
+        for k, a in enumerate(word):
+            if not isinstance(layers[k][q], dict):
+                return layers[k][q]
+            q = layers[k][q][a]
+        return layers[len(word)][q]
+
+    for n in range(1, 8):
+        layers = dfa.unrolled(n)
+        assert all(accepts(layers, w) == dfa.accepts(w) for w in itertools.product("ab", repeat=n))

@@ -50,6 +50,9 @@ the `Run` builder, Python Booleans) or on all words of a length (with the `Compi
 builder, formulas over input variables).
 """
 import ast
+import functools
+import math
+import sys
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Callable
@@ -69,6 +72,9 @@ __all__ = [
     "Builder",
     "Run",
     "Compile",
+    "Step",
+    "Automaton",
+    "HeadSummary",
 ]
 
 # ----------------------------------------------------------------------------
@@ -133,20 +139,21 @@ class Builder:
         """Defines the vector `name`, whose value at position i is `at(i)`."""
         return self.define(name, [at(i) for i in self.positions])
 
-    ## masks: the candidate positions j for position i
-    def before(self, i):
+    ## masks: the candidate positions j for position i (`head` numbers the attention in the
+    ## program, from 0, which only `Step` uses)
+    def before(self, i, head=None):
         return range(1, i)
 
-    def after(self, i):
+    def after(self, i, head=None):
         return range(i + 1, len(self.positions) + 1)
 
-    def everywhere(self, i):
+    def everywhere(self, i, head=None):
         return range(1, len(self.positions) + 1)
 
-    def upto(self, i):
+    def upto(self, i, head=None):
         return range(1, i + 1)
 
-    def onwards(self, i):
+    def onwards(self, i, head=None):
         return range(i, len(self.positions) + 1)
 
     ## attention: an if-then-else chain over the candidates, nearest first
@@ -224,6 +231,244 @@ class Compile(Builder):
 
 
 # ----------------------------------------------------------------------------
+# Automata: programs whose attentions only look at the past, as DFAs
+# ----------------------------------------------------------------------------
+
+class FutureMask(ValueError):
+    """A program with a mask that looks ahead (`after`, `onwards`, `everywhere`), which the
+    left-to-right automaton construction does not handle."""
+
+
+class Column:
+    """A vector in a `Step`: its value at the new position, and at past positions (looked up
+    in their profiles when read, since profiles only keep what attentions read at j).
+    Indexed like a `Vector`."""
+
+    def __init__(self, name: str, history: dict[int, dict], position: int, value):
+        self.name, self.history, self.position, self.value = name, history, position, value
+
+    def __getitem__(self, j):
+        return self.value if j == self.position else self.history[j][self.name]
+
+
+class Step(Builder):
+    """Runs a program at one new position, `position`, given summaries of the positions before
+    it (see `automaton`): `candidates[k]` lists the past positions that attention k may pick
+    (in order), and `history` maps each to its profile (the values there of the vectors that
+    attentions read at j). Masks only offer these (and the new position, for `upto`), so a
+    program with a future mask raises `FutureMask`."""
+
+    def __init__(self, alphabet, history: dict[int, dict], candidates: list[list[int]], position: int, symbol: str):
+        self.history, self.candidates, self.position = history, candidates, position
+        self.Q = {a: Column(f"Q{a}", history, position, symbol == a) for a in alphabet}
+        self.vectors = {f"Q{a}": self.Q[a] for a in alphabet}
+
+    def vector(self, name, at):
+        self.vectors[name] = Column(name, self.history, self.position, at(self.position))
+        return self.vectors[name]
+
+    def before(self, i, head=None):
+        return self.candidates[head]
+
+    def upto(self, i, head=None):
+        return self.candidates[head] + [i]
+
+    def after(self, i, head=None):
+        raise FutureMask("the automaton construction needs masks that look at the past (before, upto)")
+
+    everywhere = onwards = after
+
+
+@dataclass
+class Automaton:
+    """A DFA over `alphabet`: states are 0..len(delta)-1, `delta[q][a]` is the state after
+    reading symbol a in state q, `start` is the initial state and `accepting` the set of
+    accepting states."""
+    alphabet: list[str]
+    delta: list[dict[str, int]]
+    start: int
+    accepting: set[int]
+
+    @property
+    def size(self) -> int:
+        return len(self.delta)
+
+    def accepts(self, word: str) -> bool:
+        q = self.start
+        for a in word:
+            q = self.delta[q][a]
+        return q in self.accepting
+
+    def minimize(self) -> "Automaton":
+        """The minimal DFA (Moore's partition refinement), with the dead state, if any, last."""
+        block = [int(q in self.accepting) for q in range(self.size)]
+        while True:
+            signature = [(block[q],) + tuple(block[self.delta[q][a]] for a in self.alphabet)
+                         for q in range(self.size)]
+            ids = {s: k for k, s in enumerate(dict.fromkeys(signature))}
+            refined = [ids[s] for s in signature]
+            if len(ids) == len(set(block)):
+                break
+            block = refined
+        ## renumber in breadth-first order from the start (the dead state last)
+        live = self.live_states()
+        dead = {block[q] for q in range(self.size) if q not in live}
+        order, queue = [], [block[self.start]]
+        while queue:
+            b = queue.pop(0)
+            if b in order:
+                continue
+            order.append(b)
+            q = block.index(b)
+            queue += [block[self.delta[q][a]] for a in self.alphabet]
+        order.sort(key=lambda b: b in dead)
+        number = {b: k for k, b in enumerate(order)}
+        delta = [{a: number[block[self.delta[block.index(b)][a]]] for a in self.alphabet} for b in order]
+        accepting = {number[block[q]] for q in self.accepting}
+        return Automaton(self.alphabet, delta, number[block[self.start]], accepting)
+
+    def live_states(self) -> set[int]:
+        """The states from which some word is accepted."""
+        live = set(self.accepting)
+        while True:
+            more = {q for q in range(self.size) if q not in live
+                    and any(self.delta[q][a] in live for a in self.alphabet)}
+            if not more:
+                return live
+            live |= more
+
+    def unrolled(self, n: int) -> list[dict[int, bool | dict[str, int]]]:
+        """The automaton unrolled over the words of length n, as in `unroll`: node F(k, q) is
+        "the rest of the word, from position k+1 on, leads from q to acceptance", with
+        `F(n, q) = (q accepting)` and `F(k, q) = Or_a (x_{k+1} = a) And F(k+1, delta(q, a))`.
+        Returns, for each k = 0..n, the states q whose node is reached from F(0, start), mapped
+        to True (F(k, q) is ⊤: every suffix is accepted), False (⊥: none is) or the decision
+        {a: delta(q, a)} over symbol x_{k+1}. Only the nodes that are not ⊤ or ⊥ are followed,
+        so the result is what the circuit keeps (before merging equal nodes)."""
+        values: list[dict[int, bool | dict[str, int]]] = [{} for _ in range(n + 1)]
+        values[n] = {q: q in self.accepting for q in range(self.size)}
+        for k in range(n - 1, -1, -1):
+            for q in range(self.size):
+                children = [values[k + 1][self.delta[q][a]] for a in self.alphabet]
+                if all(c is True for c in children):
+                    values[k][q] = True
+                elif all(c is False for c in children):
+                    values[k][q] = False
+                else:
+                    values[k][q] = {a: self.delta[q][a] for a in self.alphabet}
+        reached = [{self.start}] + [set() for _ in range(n)]
+        for k in range(n):
+            for q in reached[k]:
+                if isinstance(values[k][q], dict):
+                    reached[k + 1] |= set(values[k][q].values())
+        return [{q: values[k][q] for q in sorted(reached[k])} for k in range(n + 1)]
+
+    def count(self, n: int) -> int:
+        """The number of accepted words of length n (forward algorithm)."""
+        weights = {self.start: 1}
+        for _ in range(n):
+            nxt: dict[int, int] = {}
+            for q, w in weights.items():
+                for a in self.alphabet:
+                    nxt[self.delta[q][a]] = nxt.get(self.delta[q][a], 0) + w
+            weights = nxt
+        return sum(w for q, w in weights.items() if q in self.accepting)
+
+
+@dataclass
+class HeadSummary:
+    """What `automaton` keeps of the past for one attention: `names` are the vectors it reads at
+    j (in its score and value), `residue` whether it reads j mod the modulus, `choose` is
+    "last" or "first", and `ordered` whether the order of the past positions matters (when the
+    value reads j; otherwise, only which profiles occurred does)."""
+    choose: str
+    names: tuple[str, ...]
+    residue: bool
+    ordered: bool
+
+
+def automaton(run: Callable, alphabet: list[str], heads: list[HeadSummary], modulus: int = 1,
+              max_states: int = 100_000) -> Automaton:
+    """The DFA of a recognizer whose attentions only look at the past, built by running the
+    program one position at a time (`run(builder)` returns its output vector).
+
+    The state after a prefix summarizes it exactly, attention by attention. A past position j
+    matters to attention k only through its *profile* for k: the values at j of the vectors
+    that k reads at j, and j mod `modulus` (the lcm of the moduli of `i % m == r`) if k reads
+    it. Among positions with the same profile, a rightmost attention (`last`) can only pick
+    the last one, and a leftmost attention (`first`) the first one, so for attention k the
+    state keeps the last (or first) occurrence of each profile, in order, or only the set of
+    profiles that occurred when its value does not read j. The state also holds the length of
+    the prefix mod `modulus`, and whether the output is true at the last position (then the
+    state is accepting). The states are then minimized.
+    """
+    def next_state(state, symbol):
+        length, summaries, _ = state
+        ## past positions, with residues as in the profiles, in order within each attention
+        ## (`i % m == r` and `j % m == r` only see residues)
+        history, candidates, j = {}, [], 0
+        for head, summary in zip(heads, summaries):
+            positions = []
+            for residue, values in summary:
+                j += 1 + (residue - j - 1) % modulus
+                history[j] = dict(zip(head.names, values))
+                positions.append(j)
+            candidates.append(positions)
+        position = j + 1 + ((length + 1) % modulus - j - 1) % modulus
+        step = Step(alphabet, history, candidates, position, symbol)
+        accepted = bool(run(step)[position])
+        new = []
+        for head, summary in zip(heads, summaries):
+            item = ((length + 1) % modulus if head.residue else 0,
+                    tuple(step.vectors[name][position] for name in head.names))
+            if not head.ordered:
+                summary = tuple(sorted(set(summary) | {item}))
+            elif head.choose == "last":
+                summary = tuple(x for x in summary if x != item) + (item,)
+            elif item not in summary:
+                summary = summary + (item,)
+            new.append(summary)
+        return ((length + 1) % modulus, tuple(new), accepted), accepted
+
+    start = (0, tuple(() for _ in heads), False)
+    index, delta, accepting, queue = {start: 0}, [{}], set(), [start]
+    while queue:
+        state = queue.pop()
+        for a in alphabet:
+            target, accepted = next_state(state, a)
+            if target not in index:
+                if len(index) >= max_states:
+                    raise ValueError(f"the automaton has more than {max_states} states")
+                index[target] = len(delta)
+                delta.append({})
+                queue.append(target)
+                if accepted:
+                    accepting.add(index[target])
+            delta[index[state]][a] = index[target]
+    return Automaton(list(alphabet), delta, 0, accepting).minimize()
+
+
+def unroll(automaton: Automaton, n: int, manager, literal: Callable):
+    """The words of length n that the automaton accepts, as an SDD: one node per state and
+    position, `node(k, q) = Or_a (exactly a at position k+1) And node(k+1, delta(q, a))`, so
+    the SDD has at most n x states decision nodes (with a right-linear vtree in position
+    order, it is the automaton's OBDD). `literal(a, k)` is the SDD literal of symbol a at k."""
+    nodes = {q: manager.true() if q in automaton.accepting else manager.false()
+             for q in range(automaton.size)}
+    for k in range(n, 0, -1):
+        symbols = {a: literal(a, k) for a in automaton.alphabet}
+        exactly = {a: symbols[a] for a in automaton.alphabet}
+        for a in automaton.alphabet:
+            for b in automaton.alphabet:
+                if b != a:
+                    exactly[a] = manager.conjoin(exactly[a], manager.negate(symbols[b]))
+        nodes = {q: functools.reduce(manager.disjoin, [
+                    manager.conjoin(exactly[a], nodes[automaton.delta[q][a]]) for a in automaton.alphabet])
+                 for q in range(automaton.size)}
+    return nodes[automaton.start]
+
+
+# ----------------------------------------------------------------------------
 # The structure of a program, as a transformer
 # ----------------------------------------------------------------------------
 
@@ -233,7 +478,8 @@ class Head:
     `query` and `key` are the vectors of the score at i and at j, `value` the vectors of the
     value at j, `value_at_i` the vectors of the value at i (combined with the attended
     position after attention), and `default` the vectors of the default (at i). `positional`
-    lists the positional predicates it uses, e.g. `j % 2 == 1`."""
+    lists the positional predicates it uses, e.g. `j % 2 == 1` (and `key_positional` and
+    `value_positional` whether the score or the value uses one of the attended position j)."""
     choose: str
     mask: str
     query: list[str] = field(default_factory=list)
@@ -242,6 +488,8 @@ class Head:
     value_at_i: list[str] = field(default_factory=list)
     default: list[str] = field(default_factory=list)
     positional: list[str] = field(default_factory=list)
+    key_positional: bool = False    ## the score reads `j % m == r`
+    value_positional: bool = False  ## the value reads `j % m == r`
     layer: int = 0
 
     def reads(self) -> list[str]:
@@ -482,6 +730,7 @@ class BraspTransformer(ast.NodeTransformer):
         self.operation: Operation | None = None  ## the operation being defined
         self.head: Head | None = None            ## the attention being visited
         self.role: str | None = None             ## "score", "value" or "default", in an attention
+        self.heads = 0                           ## attentions so far (numbering them)
 
     ## errors -----------------------------------------------------------------
 
@@ -730,6 +979,11 @@ class BraspTransformer(ast.NodeTransformer):
             self.error(node, "in `i % m == r`, we need m >= 1 and 0 <= r < m")
         predicate = f"{node.left.left.id} % {m} == {r}"  # type: ignore
         add(self.operation.positional if self.head is None else self.head.positional, predicate)
+        if self.head is not None and node.left.left.id != self.bound[0]:  # type: ignore
+            if self.role == "score":
+                self.head.key_positional = True
+            elif self.role == "value":
+                self.head.value_positional = True
         return node
 
     def visit_Call(self, node: ast.Call):
@@ -777,7 +1031,8 @@ class BraspTransformer(ast.NodeTransformer):
 
         builder = ast.Name(id=BUILDER, ctx=ast.Load())
         candidates = ast.Call(func=ast.Attribute(value=builder, attr=mask.func.id, ctx=ast.Load()),
-                              args=[ast.Name(id=i, ctx=ast.Load())], keywords=[])
+                              args=[ast.Name(id=i, ctx=ast.Load()), ast.Constant(self.heads)], keywords=[])
+        self.heads += 1
         return ast.copy_location(ast.Call(
             func=ast.Attribute(value=builder, attr=choose, ctx=ast.Load()),
             args=[candidates, lambda_(j, score), lambda_(j, value), default],
@@ -803,6 +1058,11 @@ def is_int(node: ast.AST) -> bool:
 # The language
 # ----------------------------------------------------------------------------
 
+## how `BraspLanguage` builds circuits: through CNF, directly, or from the program's DFA
+## (see `BraspLanguage`)
+COMPILATIONS = ("cnf", "direct", "automaton")
+
+
 @LanguageRegistry(name="brasp")
 class BraspLanguage(ASTModelingLanguage):
     """B-RASP programs. The alphabet is declared in the program, `alphabet("ab")`, or given
@@ -822,15 +1082,35 @@ class BraspLanguage(ASTModelingLanguage):
     fraction of words that are accepted, and `query="Qa_3"` gives P(a at position 3 | accepted).
     The input variables are `Q<symbol>_<position>`, and each vector `x` of the program has
     variables `x_<position>` (where it is not a constant).
+
+    **Compilation** (`Parser(..., compilation=...)`) builds the circuit either through CNF
+    (`"cnf"`, the default: the formulas are translated to CNF with Tseitin variables, which are
+    then quantified away, and the vtree is minimized once compiled) or directly (`"direct"`:
+    the formulas are applied as SDDs one by one, minimizing the vtree along the way, which is
+    slower on B-RASP's attention chains). With `project=True` (the default), the variables of
+    the defined vectors are then quantified away too: each is a function of the input, so this
+    leaves the same words and probabilities in a smaller circuit, over the input variables
+    only (with `project=False` they stay, and can be queried).
+
+    With `"automaton"`, the program is first turned into its minimal DFA (`automaton()`, for
+    programs whose masks only look at the past: `before` and `upto`), which is then unrolled
+    over the n positions: the circuit is the DFA's OBDD, with at most n x states decision
+    nodes, over the input variables only.
     """
 
-    def __init__(self, alphabet=None, length: int | None = None, **solver_kwargs) -> None:
+    def __init__(self, alphabet=None, length: int | None = None, compilation: str = "cnf",
+                 project: bool = True, **solver_kwargs) -> None:
+        if compilation not in COMPILATIONS:
+            raise ValueError(f"compilation is one of {', '.join(map(repr, COMPILATIONS))}, not {compilation!r}")
         super().__init__(**solver_kwargs)
+        self.compilation = compilation
+        self.project = project
         self.alphabet: list[str] | None = list(alphabet) if alphabet else None
         self.queries: list[str] = []
         self.length: int | None = length
         self.architecture: Architecture | None = None  ## the program as a transformer (see `Architecture`)
         self.compiled: Compile | None = None           ## the program compiled by `semantics`
+        self._automata: dict = {}                      ## DFAs, by program and output
 
     @property
     def glbs(self) -> dict[str, ModuleType | Callable]:
@@ -880,20 +1160,13 @@ class BraspLanguage(ASTModelingLanguage):
         if n < 1:
             raise ValueError("the length of the words is at least 1")
 
+        if self.compilation == "automaton":
+            return self.compile_automaton(program, n, output)
+
         ## run the rewritten program with a `Compile` builder
-        locals_: dict = {}
-        exec(compile(program, "<brasp>", "exec"), self.glbs, locals_)
-        function = next(f for f in locals_.values() if callable(f))
+        run = self.runner(program, output)
         compiled = Compile(self.alphabet, n)
-        returned = function(compiled)
-        if output is not None:
-            if not isinstance(returned, dict) or output not in returned:
-                raise ValueError(f"the program does not return a dict with the key {output!r}")
-            vector = returned[output]
-        else:
-            (vector,) = returned.values() if isinstance(returned, dict) \
-                else returned if isinstance(returned, tuple) else (returned,)
-        accept = vector[n]
+        accept = run(compiled)[n]
 
         formulas = list(compiled.formulas)
         if accept is False:  ## no word is accepted: a contradiction
@@ -901,17 +1174,105 @@ class BraspLanguage(ASTModelingLanguage):
         elif accept is not True:
             formulas.append(accept)
 
-        solver = Solver.from_kwargs(
+        options = dict(
             var_list=compiled.inputs + compiled.defined,
             var_weights={v: 1 / len(self.alphabet) for v in compiled.inputs},
             aux_vars=set(compiled.defined),
             categoricals=set(compiled.inputs),  ## exactly one symbol per position, w(not Qa_i) = 1
             **self.solver_kwargs,
         )
-        solver.add(formulas)
+        if self.compilation == "cnf":
+            solver = Solver.from_cnf(formulas=[str(f) for f in formulas], **options)
+        else:
+            solver = Solver.from_kwargs(**options)
+            solver.add(formulas)
+        if self.project:
+            project(solver, compiled.defined)
+        self.compiled = compiled
+        return solver
+
+    def runner(self, program: str, output: str | None = None) -> Callable:
+        """The rewritten program as a function from a builder to its output vector (the one
+        named `output`, for a program that returns a dict)."""
+        locals_: dict = {}
+        exec(compile(program, "<brasp>", "exec"), self.glbs, locals_)
+        function = next(f for f in locals_.values() if callable(f))
+
+        def run(builder):
+            returned = function(builder)
+            if output is not None:
+                if not isinstance(returned, dict) or output not in returned:
+                    raise ValueError(f"the program does not return a dict with the key {output!r}")
+                return returned[output]
+            (vector,) = returned.values() if isinstance(returned, dict) \
+                else returned if isinstance(returned, tuple) else (returned,)
+            return vector
+        return run
+
+    def automaton(self, program: str, output: str | None = None) -> Automaton:
+        """The minimal DFA of the program, for programs whose masks only look at the past
+        (see `automaton`)."""
+        key = (program, output)
+        if key not in self._automata:
+            heads = [head for _, head in self.architecture.heads]
+            moduli = [int(p.split(" % ")[1].split(" == ")[0]) for p in self.architecture.positional]
+            summaries = [HeadSummary(
+                choose=head.choose,
+                names=tuple(unique(head.key + head.value)),
+                residue=head.key_positional or head.value_positional,
+                ordered=bool(head.value) or head.value_positional,
+            ) for head in heads]
+            self._automata[key] = automaton(
+                self.runner(program, output), self.alphabet, summaries, modulus=math.lcm(1, *moduli),
+            )
+        return self._automata[key]
+
+    def compile_automaton(self, program: str, n: int, output: str | None = None) -> Solver:
+        """The solver of `compile`, built by unrolling the program's DFA (see `unroll`), with a
+        right-linear vtree in position order."""
+        from pysdd.sdd import SddManager, Vtree
+        from symprog.solvers.mapper import MapperRegistry
+
+        dfa = self.automaton(program, output)
+        compiled = Compile(self.alphabet, n)
+        inputs = compiled.inputs  ## in position order: Qa_1, Qb_1, Qa_2, ...
+        mapper = MapperRegistry.build_instance("sdd", var_list=inputs)
+        vtree = Vtree(var_count=len(inputs), var_order=list(range(1, len(inputs) + 1)), vtree_type="right")
+        mapper.manager = SddManager.from_vtree(vtree)
+        mapper._sym_map = {name: mapper.manager.literal(k + 1) for k, name in enumerate(inputs)}
+        root = unroll(dfa, n, mapper.manager, lambda a, k: mapper._sym_map[f"Q{a}_{k}"])
+        ## the SDD library's iterator recurses along the vtree, which is right-linear (deep)
+        sys.setrecursionlimit(max(sys.getrecursionlimit(), 20 * len(inputs) + 1000))
+        options = dict(self.solver_kwargs)
+        options.setdefault("no_simplify", True)  ## keep the OBDD (minimizing would change its vtree)
+        solver = Solver.from_kwargs(
+            solver=mapper,
+            formulas=root,
+            var_weights={v: 1 / len(self.alphabet) for v in inputs},
+            categoricals=set(inputs),
+            **options,
+        )
         self.compiled = compiled
         return solver
 
     def word(self, model: dict) -> str:
         """The word of a model of the solver."""
         return self.compiled.word(model)
+
+
+def project(solver: Solver, names: list[str]) -> None:
+    """Existentially quantifies the variables `names` out of the solver's circuit. They must be
+    functions of the other variables (as the defined vectors are of the input), so that each
+    model of the rest has exactly one extension: the circuit then has the same models over the
+    other variables, with the same weights. The SDD library keeps them in its manager, as free
+    variables, so they are marked as hidden (as the Tseitin variables of the CNF route are):
+    model counting, enumeration and smoothing leave them out."""
+    sdd = solver._solver
+    root = solver._formula_obj
+    quantified = [name for name in names if name in sdd._sym_map]
+    for name in quantified:
+        root = sdd.manager.exists(sdd._sym_map[name].literal, root)
+    root.ref()  ## keep it from the manager's garbage collection
+    sdd._quantified_vars = sdd._hidden_vars | set(quantified)
+    solver._formula_obj = root
+    solver._formulas = [root]  ## so that rebuilding the formula keeps the projection
